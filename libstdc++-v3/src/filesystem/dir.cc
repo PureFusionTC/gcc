@@ -146,7 +146,7 @@ fs::_Dir::advance(error_code* ec, directory_options options)
 
   int err = std::exchange(errno, 0);
   const auto entp = readdir(dirp);
-  std::swap(errno, err);
+  std::swap((int&)errno, err);
 
   if (entp)
     {
