@@ -19,7 +19,6 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #define DBX_DEBUGGING_INFO 1
-#define SDB_DEBUGGING_INFO 1
 #if TARGET_64BIT_DEFAULT || defined (HAVE_GAS_PE_SECREL32_RELOC)
 #define DWARF2_DEBUGGING_INFO 1
 #endif
@@ -308,8 +307,7 @@ do {						\
 #define TARGET_SECTION_TYPE_FLAGS  i386_pe_section_type_flags
 
 /* Write the extra assembler code needed to declare a function
-   properly.  If we are generating SDB debugging information, this
-   will happen automatically, so we only need to handle other cases.  */
+   properly.  */
 #undef ASM_DECLARE_FUNCTION_NAME
 #define ASM_DECLARE_FUNCTION_NAME(FILE, NAME, DECL) \
   i386_pe_start_function (FILE, NAME, DECL)
@@ -450,9 +448,9 @@ do {						\
 
 #define SUBTARGET_ATTRIBUTE_TABLE \
   { "selectany", 0, 0, true, false, false, ix86_handle_selectany_attribute, \
-    false }
+    false, NULL }
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
+       affects_type_identity, exclusions } */
 
 /*  mcount() does not need a counter variable.  */
 #undef NO_PROFILE_COUNTERS

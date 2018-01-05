@@ -597,27 +597,27 @@ static tree mips_handle_use_shadow_register_set_attr (tree *, tree, tree, int,
 static const struct attribute_spec mips_attribute_table[] = {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
        om_diagnostic } */
-  { "long_call",   0, 0, false, true,  true,  NULL, false },
-  { "short_call",  0, 0, false, true,  true,  NULL, false },
-  { "far",     	   0, 0, false, true,  true,  NULL, false },
-  { "near",        0, 0, false, true,  true,  NULL, false },
+  { "long_call",   0, 0, false, true,  true,  NULL, false, NULL },
+  { "short_call",  0, 0, false, true,  true,  NULL, false, NULL },
+  { "far",     	   0, 0, false, true,  true,  NULL, false, NULL },
+  { "near",        0, 0, false, true,  true,  NULL, false, NULL },
   /* We would really like to treat "mips16" and "nomips16" as type
      attributes, but GCC doesn't provide the hooks we need to support
      the right conversion rules.  As declaration attributes, they affect
      code generation but don't carry other semantics.  */
-  { "mips16", 	   0, 0, true,  false, false, NULL, false },
-  { "nomips16",    0, 0, true,  false, false, NULL, false },
-  { "micromips",   0, 0, true,  false, false, NULL, false },
-  { "nomicromips", 0, 0, true,  false, false, NULL, false },
-  { "nocompression", 0, 0, true,  false, false, NULL, false },
+  { "mips16", 	   0, 0, true,  false, false, NULL, false, NULL },
+  { "nomips16",    0, 0, true,  false, false, NULL, false, NULL },
+  { "micromips",   0, 0, true,  false, false, NULL, false, NULL },
+  { "nomicromips", 0, 0, true,  false, false, NULL, false, NULL },
+  { "nocompression", 0, 0, true,  false, false, NULL, false, NULL },
   /* Allow functions to be specified as interrupt handlers */
   { "interrupt",   0, 1, false, true,  true, mips_handle_interrupt_attr,
-    false },
+    false, NULL },
   { "use_shadow_register_set",	0, 1, false, true,  true,
-    mips_handle_use_shadow_register_set_attr, false },
-  { "keep_interrupts_masked",	0, 0, false, true,  true, NULL, false },
-  { "use_debug_exception_return", 0, 0, false, true,  true, NULL, false },
-  { NULL,	   0, 0, false, false, false, NULL, false }
+    mips_handle_use_shadow_register_set_attr, false, NULL },
+  { "keep_interrupts_masked",	0, 0, false, true,  true, NULL, false, NULL },
+  { "use_debug_exception_return", 0, 0, false, true,  true, NULL, false, NULL },
+  { NULL,	   0, 0, false, false, false, NULL, false, NULL }
 };
 
 /* A table describing all the processors GCC knows about; see
@@ -1132,7 +1132,6 @@ static rtx mips_find_pic_call_symbol (rtx_insn *, rtx, bool);
 static int mips_register_move_cost (machine_mode, reg_class_t,
 				    reg_class_t);
 static unsigned int mips_function_arg_boundary (machine_mode, const_tree);
-static machine_mode mips_get_reg_raw_mode (int regno);
 static rtx mips_gen_const_int_vector_shuffle (machine_mode, int);
 
 /* This hash table keeps track of implicit "mips16" and "nomips16" attributes
@@ -6111,7 +6110,7 @@ mips_function_arg_boundary (machine_mode mode, const_tree type)
 
 /* Implement TARGET_GET_RAW_RESULT_MODE and TARGET_GET_RAW_ARG_MODE.  */
 
-static machine_mode
+static fixed_size_mode
 mips_get_reg_raw_mode (int regno)
 {
   if (TARGET_FLOATXX && FP_REG_P (regno))
@@ -10956,7 +10955,7 @@ mips_compute_frame_info (void)
      if we know that none of the called functions will use this space.
 
      But if the target-independent frame size is nonzero, we have already
-     committed to allocating these in STARTING_FRAME_OFFSET for
+     committed to allocating these in TARGET_STARTING_FRAME_OFFSET for
      !FRAME_GROWS_DOWNWARD.  */
 
   if ((size == 0 || FRAME_GROWS_DOWNWARD)
@@ -21681,14 +21680,8 @@ mips_expand_vi_broadcast (machine_mode vmode, rtx target, rtx elt)
 rtx
 mips_gen_const_int_vector (machine_mode mode, HOST_WIDE_INT val)
 {
-  int nunits = GET_MODE_NUNITS (mode);
-  rtvec v = rtvec_alloc (nunits);
-  int i;
-
-  for (i = 0; i < nunits; i++)
-    RTVEC_ELT (v, i) = gen_int_mode (val, GET_MODE_INNER (mode));
-
-  return gen_rtx_CONST_VECTOR (mode, v);
+  rtx c = gen_int_mode (val, GET_MODE_INNER (mode));
+  return gen_const_vec_duplicate (mode, c);
 }
 
 /* Return a vector of repeated 4-element sets generated from
@@ -21843,12 +21836,7 @@ mips_expand_vector_init (rtx target, rtx vals)
 	}
       else
 	{
-	  rtvec vec = shallow_copy_rtvec (XVEC (vals, 0));
-
-	  for (i = 0; i < nelt; ++i)
-	    RTVEC_ELT (vec, i) = CONST0_RTX (imode);
-
-	  emit_move_insn (target, gen_rtx_CONST_VECTOR (vmode, vec));
+	  emit_move_insn (target, CONST0_RTX (vmode));
 
 	  for (i = 0; i < nelt; ++i)
 	    {
@@ -22346,6 +22334,17 @@ mips_constant_alignment (const_tree exp, HOST_WIDE_INT align)
     return MAX (align, BITS_PER_WORD);
   return align;
 }
+
+/* Implement TARGET_STARTING_FRAME_OFFSET.  See mips_compute_frame_info
+   for details about the frame layout.  */
+
+static HOST_WIDE_INT
+mips_starting_frame_offset (void)
+{
+  if (FRAME_GROWS_DOWNWARD)
+    return 0;
+  return crtl->outgoing_args_size + MIPS_GP_SAVE_AREA_SIZE;
+}
 
 /* Initialize the GCC target structure.  */
 #undef TARGET_ASM_ALIGNED_HI_OP
@@ -22646,6 +22645,9 @@ mips_constant_alignment (const_tree exp, HOST_WIDE_INT align)
 
 #undef TARGET_CONSTANT_ALIGNMENT
 #define TARGET_CONSTANT_ALIGNMENT mips_constant_alignment
+
+#undef TARGET_STARTING_FRAME_OFFSET
+#define TARGET_STARTING_FRAME_OFFSET mips_starting_frame_offset
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

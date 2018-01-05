@@ -1206,7 +1206,6 @@ get_dynamic_stack_size (rtx *psize, unsigned size_align,
 			unsigned required_align,
 			HOST_WIDE_INT *pstack_usage_size)
 {
-  unsigned extra = 0;
   rtx size = *psize;
 
   /* Ensure the size is in the proper mode.  */
@@ -1242,16 +1241,16 @@ get_dynamic_stack_size (rtx *psize, unsigned size_align,
      example), so we must preventively align the value.  We leave space
      in SIZE for the hole that might result from the alignment operation.  */
 
-  /* Since the stack is presumed to be aligned before this allocation,
-     we only need to increase the size of the allocation if the required
-     alignment is more than the stack alignment.  */
-  if (required_align > STACK_BOUNDARY)
+  unsigned known_align = REGNO_POINTER_ALIGN (VIRTUAL_STACK_DYNAMIC_REGNUM);
+  if (known_align == 0)
+    known_align = BITS_PER_UNIT;
+  if (required_align > known_align)
     {
-      extra = (required_align - STACK_BOUNDARY) / BITS_PER_UNIT;
+      unsigned extra = (required_align - known_align) / BITS_PER_UNIT;
       size = plus_constant (Pmode, size, extra);
       size = force_operand (size, NULL_RTX);
-      if (size_align > STACK_BOUNDARY)
-	size_align = STACK_BOUNDARY;
+      if (size_align > known_align)
+	size_align = known_align;
 
       if (flag_stack_usage_info && pstack_usage_size)
 	*pstack_usage_size += extra;
@@ -1322,6 +1321,9 @@ get_stack_check_protect (void)
    REQUIRED_ALIGN is the alignment (in bits) required for the region
    of memory.
 
+   MAX_SIZE is an upper bound for SIZE, if SIZE is not constant, or -1 if
+   no such upper bound is known.
+
    If CANNOT_ACCUMULATE is set to TRUE, the caller guarantees that the
    stack space allocated by the generated code cannot be added with itself
    in the course of the execution of the function.  It is always safe to
@@ -1331,7 +1333,9 @@ get_stack_check_protect (void)
 
 rtx
 allocate_dynamic_stack_space (rtx size, unsigned size_align,
-			      unsigned required_align, bool cannot_accumulate)
+			      unsigned required_align,
+			      HOST_WIDE_INT max_size,
+			      bool cannot_accumulate)
 {
   HOST_WIDE_INT stack_usage_size = -1;
   rtx_code_label *final_label;
@@ -1370,8 +1374,12 @@ allocate_dynamic_stack_space (rtx size, unsigned size_align,
 	    }
 	}
 
-      /* If the size is not constant, we can't say anything.  */
-      if (stack_usage_size == -1)
+      /* If the size is not constant, try the maximum size.  */
+      if (stack_usage_size < 0)
+	stack_usage_size = max_size;
+
+      /* If the size is still not constant, we can't say anything.  */
+      if (stack_usage_size < 0)
 	{
 	  current_function_has_unbounded_dynamic_stack_size = 1;
 	  stack_usage_size = 0;
@@ -1990,6 +1998,13 @@ anti_adjust_stack_and_probe_stack_clash (rtx size)
   if (size != CONST0_RTX (Pmode)
       && targetm.stack_clash_protection_final_dynamic_probe (residual))
     {
+      /* SIZE could be zero at runtime and in that case *sp could hold
+	 live data.  Furthermore, we don't want to probe into the red
+	 zone.
+
+	 Go ahead and just guard a probe at *sp on SIZE != 0 at runtime
+	 if SIZE is not a compile time constant.  */
+
       /* Ideally we would just probe at *sp.  However, if SIZE is not
 	 a compile-time constant, but is zero at runtime, then *sp
 	 might hold live data.  So probe at *sp if we know that
@@ -2002,9 +2017,12 @@ anti_adjust_stack_and_probe_stack_clash (rtx size)
 	}
       else
 	{
-	  emit_stack_probe (plus_constant (Pmode, stack_pointer_rtx,
-					   -GET_MODE_SIZE (word_mode)));
+	  rtx label = gen_label_rtx ();
+	  emit_cmp_and_jump_insns (size, CONST0_RTX (GET_MODE (size)),
+				   EQ, NULL_RTX, Pmode, 1, label);
+	  emit_stack_probe (stack_pointer_rtx);
 	  emit_insn (gen_blockage ());
+	  emit_label (label);
 	}
     }
 }
@@ -2157,7 +2175,7 @@ hard_function_value (const_tree valtype, const_tree func, const_tree fntype,
   if (REG_P (val)
       && GET_MODE (val) == BLKmode)
     {
-      unsigned HOST_WIDE_INT bytes = int_size_in_bytes (valtype);
+      unsigned HOST_WIDE_INT bytes = arg_int_size_in_bytes (valtype);
       opt_scalar_int_mode tmpmode;
 
       /* int_size_in_bytes can return -1.  We don't need a check here

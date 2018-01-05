@@ -83,33 +83,34 @@ static const char * const nds32_intrinsic_register_names[] =
 static const struct attribute_spec nds32_attribute_table[] =
 {
   /* Syntax: { name, min_len, max_len, decl_required, type_required,
-	       function_type_required, handler, affects_type_identity } */
+	       function_type_required, handler, affects_type_identity,
+	       exclusions } */
 
   /* The interrupt vid: [0-63]+ (actual vector number starts from 9 to 72).  */
-  { "interrupt",    1, 64, false, false, false, NULL, false },
+  { "interrupt",    1, 64, false, false, false, NULL, false, NULL },
   /* The exception vid: [1-8]+  (actual vector number starts from 1 to 8).  */
-  { "exception",    1,  8, false, false, false, NULL, false },
+  { "exception",    1,  8, false, false, false, NULL, false, NULL },
   /* Argument is user's interrupt numbers.  The vector number is always 0.  */
-  { "reset",        1,  1, false, false, false, NULL, false },
+  { "reset",        1,  1, false, false, false, NULL, false, NULL },
 
   /* The attributes describing isr nested type.  */
-  { "nested",       0,  0, false, false, false, NULL, false },
-  { "not_nested",   0,  0, false, false, false, NULL, false },
-  { "nested_ready", 0,  0, false, false, false, NULL, false },
+  { "nested",       0,  0, false, false, false, NULL, false, NULL },
+  { "not_nested",   0,  0, false, false, false, NULL, false, NULL },
+  { "nested_ready", 0,  0, false, false, false, NULL, false, NULL },
 
   /* The attributes describing isr register save scheme.  */
-  { "save_all",     0,  0, false, false, false, NULL, false },
-  { "partial_save", 0,  0, false, false, false, NULL, false },
+  { "save_all",     0,  0, false, false, false, NULL, false, NULL },
+  { "partial_save", 0,  0, false, false, false, NULL, false, NULL },
 
   /* The attributes used by reset attribute.  */
-  { "nmi",          1,  1, false, false, false, NULL, false },
-  { "warm",         1,  1, false, false, false, NULL, false },
+  { "nmi",          1,  1, false, false, false, NULL, false, NULL },
+  { "warm",         1,  1, false, false, false, NULL, false, NULL },
 
   /* The attribute telling no prologue/epilogue.  */
-  { "naked",        0,  0, false, false, false, NULL, false },
+  { "naked",        0,  0, false, false, false, NULL, false, NULL },
 
   /* The last attribute spec is set to be NULL.  */
-  { NULL,           0,  0, false, false, false, NULL, false }
+  { NULL,           0,  0, false, false, false, NULL, false, NULL }
 };
 
 
@@ -2188,8 +2189,14 @@ nds32_asm_file_start (void)
 			 ((TARGET_CMOV) ? "Yes"
 					: "No"));
   fprintf (asm_out_file, "\t! Use performance extension\t: %s\n",
-			 ((TARGET_PERF_EXT) ? "Yes"
+			 ((TARGET_EXT_PERF) ? "Yes"
 					    : "No"));
+  fprintf (asm_out_file, "\t! Use performance extension 2\t: %s\n",
+			 ((TARGET_EXT_PERF2) ? "Yes"
+					     : "No"));
+  fprintf (asm_out_file, "\t! Use string extension\t\t: %s\n",
+			 ((TARGET_EXT_STRING) ? "Yes"
+					      : "No"));
 
   fprintf (asm_out_file, "\t! ------------------------------------\n");
 
@@ -2576,8 +2583,8 @@ nds32_insert_attributes (tree decl, tree *attributes)
 	      id = TREE_VALUE (id_list);
 	      /* Issue error if it is not a valid integer value.  */
 	      if (TREE_CODE (id) != INTEGER_CST
-		  || wi::ltu_p (id, lower_bound)
-		  || wi::gtu_p (id, upper_bound))
+		  || wi::ltu_p (wi::to_wide (id), lower_bound)
+		  || wi::gtu_p (wi::to_wide (id), upper_bound))
 		error ("invalid id value for interrupt/exception attribute");
 
 	      /* Advance to next id.  */
@@ -2604,8 +2611,8 @@ nds32_insert_attributes (tree decl, tree *attributes)
 
 	  /* 3. Check valid integer value for reset.  */
 	  if (TREE_CODE (id) != INTEGER_CST
-	      || wi::ltu_p (id, lower_bound)
-	      || wi::gtu_p (id, upper_bound))
+	      || wi::ltu_p (wi::to_wide (id), lower_bound)
+	      || wi::gtu_p (wi::to_wide (id), upper_bound))
 	    error ("invalid id value for reset attribute");
 
 	  /* 4. Check valid function for nmi/warm.  */
@@ -2676,8 +2683,12 @@ nds32_option_override (void)
     {
       /* Under V3M ISA, we need to strictly enable TARGET_REDUCED_REGS.  */
       target_flags |= MASK_REDUCED_REGS;
-      /* Under V3M ISA, we need to strictly disable TARGET_PERF_EXT.  */
-      target_flags &= ~MASK_PERF_EXT;
+      /* Under V3M ISA, we need to strictly disable TARGET_EXT_PERF.  */
+      target_flags &= ~MASK_EXT_PERF;
+      /* Under V3M ISA, we need to strictly disable TARGET_EXT_PERF2.  */
+      target_flags &= ~MASK_EXT_PERF2;
+      /* Under V3M ISA, we need to strictly disable TARGET_EXT_STRING.  */
+      target_flags &= ~MASK_EXT_STRING;
     }
 
   /* See if we are using reduced-set registers:
@@ -3763,7 +3774,7 @@ nds32_target_alignment (rtx_insn *label)
 
 /* -- File Names in DBX Format.  */
 
-/* -- Macros for SDB and DWARF Output.  */
+/* -- Macros for DWARF Output.  */
 
 /* -- Macros for VMS Debug Format.  */
 

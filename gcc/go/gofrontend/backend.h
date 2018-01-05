@@ -254,7 +254,7 @@ class Backend
 
   // Create a reference to a variable.
   virtual Bexpression*
-  var_expression(Bvariable* var, Varexpr_context in_lvalue_pos, Location) = 0;
+  var_expression(Bvariable* var, Location) = 0;
 
   // Create an expression that indirects through the pointer expression EXPR
   // (i.e., return the expression for *EXPR). KNOWN_VALID is true if the pointer
@@ -711,12 +711,15 @@ class Backend
   // IS_INLINABLE is true if the function can be inlined.
   // DISABLE_SPLIT_STACK is true if this function may not split the stack; this
   // is used for the implementation of recover.
+  // DOES_NOT_RETURN is true for a function that does not return; this is used
+  // for the implementation of panic.
   // IN_UNIQUE_SECTION is true if this function should be put into a unique
   // location if possible; this is used for field tracking.
   virtual Bfunction*
   function(Btype* fntype, const std::string& name, const std::string& asm_name,
            bool is_visible, bool is_declaration, bool is_inlinable,
-           bool disable_split_stack, bool in_unique_section, Location) = 0;
+           bool disable_split_stack, bool does_not_return,
+	   bool in_unique_section, Location) = 0;
 
   // Create a statement that runs all deferred calls for FUNCTION.  This should
   // be a statement that looks like this in C++:

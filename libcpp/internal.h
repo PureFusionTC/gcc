@@ -246,7 +246,7 @@ struct lexer_state
      all directives apart from #define.  */
   unsigned char save_comments;
 
-  /* Nonzero if lexing __VA_ARGS__ is valid.  */
+  /* Nonzero if lexing __VA_ARGS__ and __VA_OPT__ are valid.  */
   unsigned char va_args_ok;
 
   /* Nonzero if lexing poisoned identifiers is valid.  */
@@ -282,6 +282,7 @@ struct spec_nodes
   cpp_hashnode *n_true;			/* C++ keyword true */
   cpp_hashnode *n_false;		/* C++ keyword false */
   cpp_hashnode *n__VA_ARGS__;		/* C99 vararg macros */
+  cpp_hashnode *n__VA_OPT__;		/* C++ vararg macros */
   cpp_hashnode *n__has_include__;	/* __has_include__ operator */
   cpp_hashnode *n__has_include_next__;	/* __has_include_next__ operator */
 };
@@ -708,7 +709,7 @@ struct _cpp_dir_only_callbacks
 {
   /* Called to print a block of lines. */
   void (*print_lines) (int, const void *, size_t);
-  void (*maybe_print_line) (source_location);
+  bool (*maybe_print_line) (source_location);
 };
 
 extern void _cpp_preprocess_dir_only (cpp_reader *,

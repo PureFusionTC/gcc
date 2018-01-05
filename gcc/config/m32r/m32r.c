@@ -104,17 +104,18 @@ static bool m32r_legitimate_constant_p (machine_mode, rtx);
 static bool m32r_attribute_identifier (const_tree);
 static bool m32r_hard_regno_mode_ok (unsigned int, machine_mode);
 static bool m32r_modes_tieable_p (machine_mode, machine_mode);
+static HOST_WIDE_INT m32r_starting_frame_offset (void);
 
 /* M32R specific attributes.  */
 
 static const struct attribute_spec m32r_attribute_table[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { "interrupt", 0, 0, true,  false, false, NULL, false },
+       affects_type_identity, exclusions } */
+  { "interrupt", 0, 0, true,  false, false, NULL, false, NULL },
   { "model",     1, 1, true,  false, false, m32r_handle_model_attribute,
-    false },
-  { NULL,        0, 0, false, false, false, NULL, false }
+    false, NULL },
+  { NULL,        0, 0, false, false, false, NULL, false, NULL }
 };
 
 /* Initialize the GCC target structure.  */
@@ -219,6 +220,9 @@ static const struct attribute_spec m32r_attribute_table[] =
 
 #undef TARGET_CONSTANT_ALIGNMENT
 #define TARGET_CONSTANT_ALIGNMENT constant_alignment_word_strings
+
+#undef TARGET_STARTING_FRAME_OFFSET
+#define TARGET_STARTING_FRAME_OFFSET m32r_starting_frame_offset
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 
@@ -2958,4 +2962,13 @@ m32r_legitimate_constant_p (machine_mode mode ATTRIBUTE_UNUSED, rtx x)
 	       || GET_CODE (XEXP (XEXP (x, 0), 0)) == LABEL_REF)
 	   && CONST_INT_P (XEXP (XEXP (x, 0), 1))
 	   && UINTVAL (XEXP (XEXP (x, 0), 1)) > 32767);
+}
+
+/* Implement TARGET_STARTING_FRAME_OFFSET.  The frame pointer points at
+   the same place as the stack pointer, except if alloca has been called.  */
+
+static HOST_WIDE_INT
+m32r_starting_frame_offset (void)
+{
+  return M32R_STACK_ALIGN (crtl->outgoing_args_size);
 }

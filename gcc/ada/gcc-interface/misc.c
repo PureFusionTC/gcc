@@ -262,6 +262,9 @@ gnat_post_options (const char **pfilename ATTRIBUTE_UNUSED)
   /* No psABI change warnings for Ada.  */
   warn_psabi = 0;
 
+  /* No return type warnings for Ada.  */
+  warn_return_type = 0;
+
   /* No caret by default for Ada.  */
   if (!global_options_set.x_flag_diagnostics_show_caret)
     global_dc->show_caret = false;
@@ -1141,16 +1144,16 @@ default_pass_by_ref (tree gnu_type)
      is an In Out parameter, but it's probably best to err on the side of
      passing more things by reference.  */
 
-  if (pass_by_reference (NULL, TYPE_MODE (gnu_type), gnu_type, true))
-    return true;
-
-  if (targetm.calls.return_in_memory (gnu_type, NULL_TREE))
-    return true;
-
   if (AGGREGATE_TYPE_P (gnu_type)
       && (!valid_constant_size_p (TYPE_SIZE_UNIT (gnu_type))
 	  || 0 < compare_tree_int (TYPE_SIZE_UNIT (gnu_type),
 				   TYPE_ALIGN (gnu_type))))
+    return true;
+
+  if (pass_by_reference (NULL, TYPE_MODE (gnu_type), gnu_type, true))
+    return true;
+
+  if (targetm.calls.return_in_memory (gnu_type, NULL_TREE))
     return true;
 
   return false;
@@ -1370,6 +1373,23 @@ gnat_init_ts (void)
   MARK_TS_TYPED (EXIT_STMT);
 }
 
+/* Return the size of a tree with CODE, which is a language-specific tree code
+   in category tcc_constant, tcc_exceptional or tcc_type.  The default expects
+   never to be called.  */
+
+static size_t
+gnat_tree_size (enum tree_code code)
+{
+  gcc_checking_assert (code >= NUM_TREE_CODES);
+  switch (code)
+    {
+    case UNCONSTRAINED_ARRAY_TYPE:
+      return sizeof (tree_type_non_common);
+    default:
+      gcc_unreachable ();
+    }
+}
+
 /* Return the lang specific structure attached to NODE.  Allocate it (cleared)
    if needed.  */
 
@@ -1387,6 +1407,8 @@ get_lang_specific (tree node)
 #define LANG_HOOKS_NAME			"GNU Ada"
 #undef  LANG_HOOKS_IDENTIFIER_SIZE
 #define LANG_HOOKS_IDENTIFIER_SIZE	sizeof (struct tree_identifier)
+#undef  LANG_HOOKS_TREE_SIZE
+#define LANG_HOOKS_TREE_SIZE		gnat_tree_size
 #undef  LANG_HOOKS_INIT
 #define LANG_HOOKS_INIT			gnat_init
 #undef  LANG_HOOKS_OPTION_LANG_MASK

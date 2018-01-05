@@ -329,7 +329,7 @@ static tree ia64_fold_builtin (tree, int, tree *, bool);
 static tree ia64_builtin_decl (unsigned, bool);
 
 static reg_class_t ia64_preferred_reload_class (rtx, reg_class_t);
-static machine_mode ia64_get_reg_raw_mode (int regno);
+static fixed_size_mode ia64_get_reg_raw_mode (int regno);
 static section * ia64_hpux_function_section (tree, enum node_frequency,
 					     bool, bool);
 
@@ -360,17 +360,17 @@ static bool ia64_expand_vec_perm_const_1 (struct expand_vec_perm_d *d);
 static const struct attribute_spec ia64_attribute_table[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { "syscall_linkage", 0, 0, false, true,  true,  NULL, false },
+       affects_type_identity, exclusions } */
+  { "syscall_linkage", 0, 0, false, true,  true,  NULL, false, NULL },
   { "model",	       1, 1, true, false, false, ia64_handle_model_attribute,
-    false },
+    false, NULL },
 #if TARGET_ABI_OPEN_VMS
   { "common_object",   1, 1, true, false, false,
-    ia64_vms_common_object_attribute, false },
+    ia64_vms_common_object_attribute, false, NULL },
 #endif
   { "version_id",      1, 1, true, false, false,
-    ia64_handle_version_id_attribute, false },
-  { NULL,	       0, 0, false, false, false, NULL, false }
+    ia64_handle_version_id_attribute, false, NULL },
+  { NULL,	       0, 0, false, false, false, NULL, false, NULL }
 };
 
 /* Initialize the GCC target structure.  */
@@ -1938,7 +1938,7 @@ ia64_expand_vecint_compare (enum rtx_code code, machine_mode mode,
 	    /* Subtract (-(INT MAX) - 1) from both operands to make
 	       them signed.  */
 	    mask = gen_int_mode (0x80000000, SImode);
-	    mask = gen_rtx_CONST_VECTOR (V2SImode, gen_rtvec (2, mask, mask));
+	    mask = gen_const_vec_duplicate (V2SImode, mask);
 	    mask = force_reg (mode, mask);
 	    t1 = gen_reg_rtx (mode);
 	    emit_insn (gen_subv2si3 (t1, op0, mask));
@@ -11328,7 +11328,7 @@ ia64_dconst_0_375 (void)
   return ia64_dconst_0_375_rtx;
 }
 
-static machine_mode
+static fixed_size_mode
 ia64_get_reg_raw_mode (int regno)
 {
   if (FR_REGNO_P (regno))

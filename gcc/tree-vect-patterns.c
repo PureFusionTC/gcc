@@ -3714,7 +3714,7 @@ vect_recog_bool_pattern (vec<gimple *> *stmts, tree *type_in,
          vectorized matches the vector type of the result in
 	 size and number of elements.  */
       unsigned prec
-	= wi::udiv_trunc (TYPE_SIZE (vectype),
+	= wi::udiv_trunc (wi::to_wide (TYPE_SIZE (vectype)),
 			  TYPE_VECTOR_SUBPARTS (vectype)).to_uhwi ();
       tree type
 	= build_nonstandard_integer_type (prec,
@@ -3975,6 +3975,32 @@ vect_recog_mask_conversion_pattern (vec<gimple *> *stmts, tree *type_in,
       if (!vectype1 || !vectype2
 	  || TYPE_VECTOR_SUBPARTS (vectype1) == TYPE_VECTOR_SUBPARTS (vectype2))
 	return NULL;
+
+      /* If rhs1 is invariant and we can promote it leave the COND_EXPR
+         in place, we can handle it in vectorizable_condition.  This avoids
+	 unnecessary promotion stmts and increased vectorization factor.  */
+      if (COMPARISON_CLASS_P (rhs1)
+	  && INTEGRAL_TYPE_P (rhs1_type)
+	  && TYPE_VECTOR_SUBPARTS (vectype1) < TYPE_VECTOR_SUBPARTS (vectype2))
+	{
+	  gimple *dummy;
+	  enum vect_def_type dt;
+	  if (vect_is_simple_use (TREE_OPERAND (rhs1, 0), stmt_vinfo->vinfo,
+				  &dummy, &dt)
+	      && dt == vect_external_def
+	      && vect_is_simple_use (TREE_OPERAND (rhs1, 1), stmt_vinfo->vinfo,
+				     &dummy, &dt)
+	      && (dt == vect_external_def
+		  || dt == vect_constant_def))
+	    {
+	      tree wide_scalar_type = build_nonstandard_integer_type
+		(tree_to_uhwi (TYPE_SIZE (TREE_TYPE (vectype1))),
+		 TYPE_UNSIGNED (rhs1_type));
+	      tree vectype3 = get_vectype_for_scalar_type (wide_scalar_type);
+	      if (expand_vec_cond_expr_p (vectype1, vectype3, TREE_CODE (rhs1)))
+		return NULL;
+	    }
+	}
 
       /* If rhs1 is a comparison we need to move it into a
 	 separate statement.  */

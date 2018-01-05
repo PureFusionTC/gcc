@@ -73,6 +73,8 @@ extern void cp_register_dumps (gcc::dump_manager *);
 #define LANG_HOOKS_DUP_LANG_SPECIFIC_DECL cxx_dup_lang_specific_decl
 #undef LANG_HOOKS_SET_DECL_ASSEMBLER_NAME
 #define LANG_HOOKS_SET_DECL_ASSEMBLER_NAME mangle_decl
+#undef LANG_HOOKS_OVERWRITE_DECL_ASSEMBLER_NAME
+#define LANG_HOOKS_OVERWRITE_DECL_ASSEMBLER_NAME overwrite_mangling
 #undef LANG_HOOKS_PRINT_STATISTICS
 #define LANG_HOOKS_PRINT_STATISTICS cxx_print_statistics
 #undef LANG_HOOKS_PRINT_XNODE
@@ -105,6 +107,8 @@ extern void cp_register_dumps (gcc::dump_manager *);
 #define LANG_HOOKS_MISSING_NORETURN_OK_P cp_missing_noreturn_ok_p
 #undef LANG_HOOKS_BLOCK_MAY_FALLTHRU
 #define LANG_HOOKS_BLOCK_MAY_FALLTHRU cxx_block_may_fallthru
+#undef LANG_HOOKS_EMITS_BEGIN_STMT
+#define LANG_HOOKS_EMITS_BEGIN_STMT true
 
 /* Attribute hooks.  */
 #undef LANG_HOOKS_COMMON_ATTRIBUTE_TABLE

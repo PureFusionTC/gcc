@@ -3607,12 +3607,12 @@ fold_rtx (rtx x, rtx_insn *insn)
 	      enum rtx_code associate_code;
 
 	      if (is_shift
-		  && (INTVAL (const_arg1) >= GET_MODE_PRECISION (mode)
+		  && (INTVAL (const_arg1) >= GET_MODE_UNIT_PRECISION (mode)
 		      || INTVAL (const_arg1) < 0))
 		{
 		  if (SHIFT_COUNT_TRUNCATED)
 		    canon_const_arg1 = GEN_INT (INTVAL (const_arg1)
-						& (GET_MODE_BITSIZE (mode)
+						& (GET_MODE_UNIT_BITSIZE (mode)
 						   - 1));
 		  else
 		    break;
@@ -3656,12 +3656,13 @@ fold_rtx (rtx x, rtx_insn *insn)
                 break;
 
 	      if (is_shift
-		  && (INTVAL (inner_const) >= GET_MODE_PRECISION (mode)
+		  && (INTVAL (inner_const) >= GET_MODE_UNIT_PRECISION (mode)
 		      || INTVAL (inner_const) < 0))
 		{
 		  if (SHIFT_COUNT_TRUNCATED)
 		    inner_const = GEN_INT (INTVAL (inner_const)
-					   & (GET_MODE_BITSIZE (mode) - 1));
+					   & (GET_MODE_UNIT_BITSIZE (mode)
+					      - 1));
 		  else
 		    break;
 		}
@@ -3686,12 +3687,12 @@ fold_rtx (rtx x, rtx_insn *insn)
 
 	      if (is_shift
 		  && CONST_INT_P (new_const)
-		  && INTVAL (new_const) >= GET_MODE_PRECISION (mode))
+		  && INTVAL (new_const) >= GET_MODE_UNIT_PRECISION (mode))
 		{
 		  /* As an exception, we can turn an ASHIFTRT of this
 		     form into a shift of the number of bits - 1.  */
 		  if (code == ASHIFTRT)
-		    new_const = GEN_INT (GET_MODE_BITSIZE (mode) - 1);
+		    new_const = GEN_INT (GET_MODE_UNIT_BITSIZE (mode) - 1);
 		  else if (!side_effects_p (XEXP (y, 0)))
 		    return CONST0_RTX (mode);
 		  else
@@ -5977,7 +5978,6 @@ cse_insn (rtx_insn *insn)
 		rtx new_src = 0;
 		unsigned src_hash;
 		struct table_elt *src_elt;
-		int byte = 0;
 
 		/* Ignore invalid entries.  */
 		if (!REG_P (elt->exp)
@@ -5990,13 +5990,8 @@ cse_insn (rtx_insn *insn)
 		  new_src = elt->exp;
 		else
 		  {
-		    /* Calculate big endian correction for the SUBREG_BYTE.
-		       We have already checked that M1 (GET_MODE (dest))
-		       is not narrower than M2 (new_mode).  */
-		    if (BYTES_BIG_ENDIAN)
-		      byte = (GET_MODE_SIZE (GET_MODE (dest))
-			      - GET_MODE_SIZE (new_mode));
-
+		    unsigned int byte
+		      = subreg_lowpart_offset (new_mode, GET_MODE (dest));
 		    new_src = simplify_gen_subreg (new_mode, elt->exp,
 					           GET_MODE (dest), byte);
 		  }
@@ -6967,10 +6962,17 @@ insn_live_p (rtx_insn *insn, int *counts)
     {
       rtx_insn *next;
 
+      if (DEBUG_MARKER_INSN_P (insn))
+	return true;
+
       for (next = NEXT_INSN (insn); next; next = NEXT_INSN (next))
 	if (NOTE_P (next))
 	  continue;
 	else if (!DEBUG_INSN_P (next))
+	  return true;
+	/* If we find an inspection point, such as a debug begin stmt,
+	   we want to keep the earlier debug insn.  */
+	else if (DEBUG_MARKER_INSN_P (next))
 	  return true;
 	else if (INSN_VAR_LOCATION_DECL (insn) == INSN_VAR_LOCATION_DECL (next))
 	  return false;
@@ -7054,11 +7056,11 @@ delete_trivially_dead_insns (rtx_insn *insns, int nreg)
 
   timevar_push (TV_DELETE_TRIVIALLY_DEAD);
   /* First count the number of times each register is used.  */
-  if (MAY_HAVE_DEBUG_INSNS)
+  if (MAY_HAVE_DEBUG_BIND_INSNS)
     {
       counts = XCNEWVEC (int, nreg * 3);
       for (insn = insns; insn; insn = NEXT_INSN (insn))
-	if (DEBUG_INSN_P (insn))
+	if (DEBUG_BIND_INSN_P (insn))
 	  count_reg_usage (INSN_VAR_LOCATION_LOC (insn), counts + nreg,
 			   NULL_RTX, 1);
 	else if (INSN_P (insn))
@@ -7116,12 +7118,15 @@ delete_trivially_dead_insns (rtx_insn *insns, int nreg)
       if (! live_insn && dbg_cnt (delete_trivial_dead))
 	{
 	  if (DEBUG_INSN_P (insn))
-	    count_reg_usage (INSN_VAR_LOCATION_LOC (insn), counts + nreg,
-			     NULL_RTX, -1);
+	    {
+	      if (DEBUG_BIND_INSN_P (insn))
+		count_reg_usage (INSN_VAR_LOCATION_LOC (insn), counts + nreg,
+				 NULL_RTX, -1);
+	    }
 	  else
 	    {
 	      rtx set;
-	      if (MAY_HAVE_DEBUG_INSNS
+	      if (MAY_HAVE_DEBUG_BIND_INSNS
 		  && (set = single_set (insn)) != NULL_RTX
 		  && is_dead_reg (SET_DEST (set), counts)
 		  /* Used at least once in some DEBUG_INSN.  */
@@ -7161,10 +7166,10 @@ delete_trivially_dead_insns (rtx_insn *insns, int nreg)
 	}
     }
 
-  if (MAY_HAVE_DEBUG_INSNS)
+  if (MAY_HAVE_DEBUG_BIND_INSNS)
     {
       for (insn = get_last_insn (); insn; insn = PREV_INSN (insn))
-	if (DEBUG_INSN_P (insn))
+	if (DEBUG_BIND_INSN_P (insn))
 	  {
 	    /* If this debug insn references a dead register that wasn't replaced
 	       with an DEBUG_EXPR, reset the DEBUG_INSN.  */

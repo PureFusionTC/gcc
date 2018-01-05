@@ -310,7 +310,7 @@ package body Exp_Ch7 is
    function Build_Cleanup_Statements
      (N                  : Node_Id;
       Additional_Cleanup : List_Id) return List_Id;
-   --  Create the clean up calls for an asynchronous call block, task master,
+   --  Create the cleanup calls for an asynchronous call block, task master,
    --  protected subprogram body, task allocation block or task body, or
    --  additional cleanup actions parked on a transient block. If the context
    --  does not contain the above constructs, the routine returns an empty
@@ -479,7 +479,7 @@ package body Exp_Ch7 is
          return False;
 
       --  Do not consider C and C++ types since it is assumed that the non-Ada
-      --  side will handle their clean up.
+      --  side will handle their cleanup.
 
       elsif Convention (Desig_Typ) = Convention_C
         or else Convention (Desig_Typ) = Convention_CPP
@@ -1554,8 +1554,8 @@ package body Exp_Ch7 is
             Jump_Alts := New_List;
          end if;
 
-         --  If the context requires additional clean up, the finalization
-         --  machinery is added after the clean up code.
+         --  If the context requires additional cleanup, the finalization
+         --  machinery is added after the cleanup code.
 
          if Acts_As_Clean then
             Finalizer_Stmts       := Clean_Stmts;
@@ -1784,7 +1784,7 @@ package body Exp_Ch7 is
          end if;
 
          --  Protect the statements with abort defer/undefer. This is only when
-         --  aborts are allowed and the clean up statements require deferral or
+         --  aborts are allowed and the cleanup statements require deferral or
          --  there are controlled objects to be finalized. Note that the abort
          --  defer/undefer pair does not require an extra block because each
          --  finalization exception is caught in its corresponding finalization
@@ -1800,7 +1800,7 @@ package body Exp_Ch7 is
 
          --  The local exception does not need to be reraised for library-level
          --  finalizers. Note that this action must be carried out after object
-         --  clean up, secondary stack release and abort undeferral. Generate:
+         --  cleanup, secondary stack release, and abort undeferral. Generate:
 
          --    if Raised and then not Abort then
          --       Raise_From_Controlled_Operation (E);
@@ -1907,7 +1907,7 @@ package body Exp_Ch7 is
             Append_To (Spec_Decls, Fin_Spec);
             Analyze (Fin_Spec);
 
-            --  When the finalizer acts solely as a clean up routine, the body
+            --  When the finalizer acts solely as a cleanup routine, the body
             --  is inserted right after the spec.
 
             if Acts_As_Clean and not Has_Ctrl_Objs then
@@ -1955,7 +1955,7 @@ package body Exp_Ch7 is
                Insert_After (Finalizer_Insert_Nod, Fin_Body);
             end if;
 
-            Analyze (Fin_Body);
+            Analyze (Fin_Body, Suppress => All_Checks);
          end if;
       end Create_Finalizer;
 
@@ -2605,8 +2605,8 @@ package body Exp_Ch7 is
             --  procedures of types Init_Typ or Obj_Typ.
 
             function Next_Suitable_Statement (Stmt : Node_Id) return Node_Id;
-            --  Given a statement which is part of a list, return the next
-            --  statement while skipping over dynamic elab checks.
+            --  Obtain the next statement which follows list member Stmt while
+            --  ignoring artifacts related to access-before-elaboration checks.
 
             -----------------------------
             -- Find_Last_Init_In_Block --
@@ -2725,16 +2725,22 @@ package body Exp_Ch7 is
             -----------------------------
 
             function Next_Suitable_Statement (Stmt : Node_Id) return Node_Id is
-               Result : Node_Id := Next (Stmt);
+               Result : Node_Id;
 
             begin
-               --  Skip over access-before-elaboration checks
+               --  Skip call markers and Program_Error raises installed by the
+               --  ABE mechanism.
 
-               if Dynamic_Elaboration_Checks
-                 and then Nkind (Result) = N_Raise_Program_Error
-               then
+               Result := Next (Stmt);
+               while Present (Result) loop
+                  if not Nkind_In (Result, N_Call_Marker,
+                                           N_Raise_Program_Error)
+                  then
+                     exit;
+                  end if;
+
                   Result := Next (Result);
-               end if;
+               end loop;
 
                return Result;
             end Next_Suitable_Statement;
@@ -4057,7 +4063,7 @@ package body Exp_Ch7 is
 
    --  This procedure is called each time a transient block has to be inserted
    --  that is to say for each call to a function with unconstrained or tagged
-   --  result. It creates a new scope on the stack scope in order to enclose
+   --  result. It creates a new scope on the scope stack in order to enclose
    --  all transient variables generated.
 
    procedure Establish_Transient_Scope (N : Node_Id; Sec_Stack : Boolean) is
@@ -4194,13 +4200,22 @@ package body Exp_Ch7 is
    ----------------------------
 
    procedure Expand_Cleanup_Actions (N : Node_Id) is
+      pragma Assert
+        (Nkind_In (N,
+                   N_Extended_Return_Statement,
+                   N_Block_Statement,
+                   N_Subprogram_Body,
+                   N_Task_Body,
+                   N_Entry_Body));
+
       Scop : constant Entity_Id := Current_Scope;
 
       Is_Asynchronous_Call   : constant Boolean :=
                                  Nkind (N) = N_Block_Statement
                                    and then Is_Asynchronous_Call_Block (N);
       Is_Master              : constant Boolean :=
-                                 Nkind (N) /= N_Entry_Body
+                                 Nkind (N) /= N_Extended_Return_Statement
+                                   and then Nkind (N) /= N_Entry_Body
                                    and then Is_Task_Master (N);
       Is_Protected_Subp_Body : constant Boolean :=
                                  Nkind (N) = N_Subprogram_Body
@@ -4292,6 +4307,48 @@ package body Exp_Ch7 is
         and then Nkind (N) = N_Subprogram_Body
         and then not Delay_Subprogram_Descriptors (Corresponding_Spec (N))
       then
+         return;
+      end if;
+
+      --  If an extended return statement contains something like
+      --     X := F (...);
+      --  where F is a build-in-place function call returning a controlled
+      --  type, then a temporary object will be implicitly declared as part of
+      --  the statement list, and this will need cleanup. In such cases, we
+      --  transform:
+      --
+      --    return Result : T := ... do
+      --       <statements> -- possibly with handlers
+      --    end return;
+      --
+      --  into:
+      --
+      --    return Result : T := ... do
+      --       declare -- no declarations
+      --       begin
+      --          <statements> -- possibly with handlers
+      --       end; -- no handlers
+      --    end return;
+      --
+      --  So Expand_Cleanup_Actions will end up being called recursively on the
+      --  block statement.
+
+      if Nkind (N) = N_Extended_Return_Statement then
+         declare
+            Block : constant Node_Id :=
+              Make_Block_Statement (Sloc (N),
+               Declarations => Empty_List,
+               Handled_Statement_Sequence =>
+                 Handled_Statement_Sequence (N));
+         begin
+            Set_Handled_Statement_Sequence
+              (N, Make_Handled_Sequence_Of_Statements (Sloc (N),
+                    Statements => New_List (Block)));
+            Analyze (Block);
+         end;
+
+         --  Analysis of the block did all the work
+
          return;
       end if;
 
@@ -4463,7 +4520,7 @@ package body Exp_Ch7 is
       --  This is done only for non-generic packages
 
       if Ekind (Spec_Id) = E_Package then
-         Push_Scope (Corresponding_Spec (N));
+         Push_Scope (Spec_Id);
 
          --  Build dispatch tables of library level tagged types
 
@@ -4475,18 +4532,15 @@ package body Exp_Ch7 is
 
          Build_Task_Activation_Call (N);
 
-         --  When the package is subject to pragma Initial_Condition, the
-         --  assertion expression must be verified at the end of the body
-         --  statements.
+         --  Verify the run-time semantics of pragma Initial_Condition at the
+         --  end of the body statements.
 
-         if Present (Get_Pragma (Spec_Id, Pragma_Initial_Condition)) then
-            Expand_Pragma_Initial_Condition (N);
-         end if;
+         Expand_Pragma_Initial_Condition (Spec_Id, N);
 
          Pop_Scope;
       end if;
 
-      Set_Elaboration_Flag (N, Corresponding_Spec (N));
+      Set_Elaboration_Flag (N, Spec_Id);
       Set_In_Package_Body (Spec_Id, False);
 
       --  Set to encode entity names in package body before gigi is called
@@ -4601,14 +4655,10 @@ package body Exp_Ch7 is
             Build_Task_Activation_Call (N);
          end if;
 
-         --  When the package is subject to pragma Initial_Condition and lacks
-         --  a body, the assertion expression must be verified at the end of
-         --  the visible declarations. Otherwise the check is performed at the
-         --  end of the body statements (see Expand_N_Package_Body).
+         --  Verify the run-time semantics of pragma Initial_Condition at the
+         --  end of the private declarations when the package lacks a body.
 
-         if Present (Get_Pragma (Id, Pragma_Initial_Condition)) then
-            Expand_Pragma_Initial_Condition (N);
-         end if;
+         Expand_Pragma_Initial_Condition (Id, N);
 
          Pop_Scope;
       end if;
@@ -5208,10 +5258,10 @@ package body Exp_Ch7 is
             then
                Loc := Sloc (Obj_Decl);
 
-               --  Before generating the clean up code for the first transient
+               --  Before generating the cleanup code for the first transient
                --  object, create a wrapper block which houses all hook clear
                --  statements and finalization calls. This wrapper is needed by
-               --  the back-end.
+               --  the back end.
 
                if not Built then
                   Built     := True;
@@ -8681,10 +8731,10 @@ package body Exp_Ch7 is
       --       Finalizer;
       --    end;
 
-      --  A special case is made for Boolean expressions so that the back-end
+      --  A special case is made for Boolean expressions so that the back end
       --  knows to generate a conditional branch instruction, if running with
-      --  -fpreserve-control-flow. This ensures that a control flow change
-      --  signalling the decision outcome occurs before the cleanup actions.
+      --  -fpreserve-control-flow. This ensures that a control-flow change
+      --  signaling the decision outcome occurs before the cleanup actions.
 
       if Opt.Suppress_Control_Flow_Optimizations
         and then Is_Boolean_Type (Typ)

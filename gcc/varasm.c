@@ -986,9 +986,9 @@ decode_reg_name (const char *name)
 bool
 bss_initializer_p (const_tree decl)
 {
-  /* Do not put constants into the .bss section, they belong in a readonly
-     section.  */
-  return (!TREE_READONLY (decl)
+  /* Do not put non-common constants into the .bss section, they belong in
+     a readonly section.  */
+  return ((!TREE_READONLY (decl) || DECL_COMMON (decl))
 	  && (DECL_INITIAL (decl) == NULL
 	      /* In LTO we have no errors in program; error_mark_node is used
 	         to mark offlined constructors.  */
@@ -2399,8 +2399,7 @@ incorporeal_function_p (tree decl)
       const char *name;
 
       if (DECL_BUILT_IN_CLASS (decl) == BUILT_IN_NORMAL
-	  && (DECL_FUNCTION_CODE (decl) == BUILT_IN_ALLOCA
-	      || DECL_FUNCTION_CODE (decl) == BUILT_IN_ALLOCA_WITH_ALIGN))
+	  && ALLOCA_FUNCTION_CODE_P (DECL_FUNCTION_CODE (decl)))
 	return true;
 
       name = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (decl));
@@ -2880,7 +2879,7 @@ static void
 decode_addr_const (tree exp, struct addr_const *value)
 {
   tree target = TREE_OPERAND (exp, 0);
-  int offset = 0;
+  HOST_WIDE_INT offset = 0;
   rtx x;
 
   while (1)
@@ -2894,8 +2893,9 @@ decode_addr_const (tree exp, struct addr_const *value)
       else if (TREE_CODE (target) == ARRAY_REF
 	       || TREE_CODE (target) == ARRAY_RANGE_REF)
 	{
-	  offset += (tree_to_uhwi (TYPE_SIZE_UNIT (TREE_TYPE (target)))
-		     * tree_to_shwi (TREE_OPERAND (target, 1)));
+	  /* Truncate big offset.  */
+	  offset += (TREE_INT_CST_LOW (TYPE_SIZE_UNIT (TREE_TYPE (target)))
+		     * TREE_INT_CST_LOW (TREE_OPERAND (target, 1)));
 	  target = TREE_OPERAND (target, 0);
 	}
       else if (TREE_CODE (target) == MEM_REF
@@ -3007,13 +3007,11 @@ const_hash_1 (const tree exp)
 
     case VECTOR_CST:
       {
-	unsigned i;
-
-	hi = 7 + VECTOR_CST_NELTS (exp);
-
-	for (i = 0; i < VECTOR_CST_NELTS (exp); ++i)
-	  hi = hi * 563 + const_hash_1 (VECTOR_CST_ELT (exp, i));
-
+	hi = 7 + VECTOR_CST_NPATTERNS (exp);
+	hi = hi * 563 + VECTOR_CST_NELTS_PER_PATTERN (exp);
+	unsigned int count = vector_cst_encoded_nelts (exp);
+	for (unsigned int i = 0; i < count; ++i)
+	  hi = hi * 563 + const_hash_1 (VECTOR_CST_ENCODED_ELT (exp, i));
 	return hi;
       }
 
@@ -3118,10 +3116,16 @@ compare_constant (const tree t1, const tree t2)
       return tree_int_cst_equal (t1, t2);
 
     case REAL_CST:
-      /* Real constants are the same only if the same width of type.  */
+      /* Real constants are the same only if the same width of type.  In
+	 addition to the same width, we need to check whether the modes are the
+	 same.  There might be two floating point modes that are the same size
+	 but have different representations, such as the PowerPC that has 2
+	 different 128-bit floating point types (IBM extended double and IEEE
+	 128-bit floating point).  */
       if (TYPE_PRECISION (TREE_TYPE (t1)) != TYPE_PRECISION (TREE_TYPE (t2)))
 	return 0;
-
+      if (TYPE_MODE (TREE_TYPE (t1)) != TYPE_MODE (TREE_TYPE (t2)))
+	return 0;
       return real_identical (&TREE_REAL_CST (t1), &TREE_REAL_CST (t2));
 
     case FIXED_CST:
@@ -3145,14 +3149,18 @@ compare_constant (const tree t1, const tree t2)
 
     case VECTOR_CST:
       {
-	unsigned i;
-
-        if (VECTOR_CST_NELTS (t1) != VECTOR_CST_NELTS (t2))
+	if (VECTOR_CST_NPATTERNS (t1)
+	    != VECTOR_CST_NPATTERNS (t2))
 	  return 0;
 
-	for (i = 0; i < VECTOR_CST_NELTS (t1); ++i)
-	  if (!compare_constant (VECTOR_CST_ELT (t1, i),
-				 VECTOR_CST_ELT (t2, i)))
+	if (VECTOR_CST_NELTS_PER_PATTERN (t1)
+	    != VECTOR_CST_NELTS_PER_PATTERN (t2))
+	  return 0;
+
+	unsigned int count = vector_cst_encoded_nelts (t1);
+	for (unsigned int i = 0; i < count; ++i)
+	  if (!compare_constant (VECTOR_CST_ENCODED_ELT (t1, i),
+				 VECTOR_CST_ENCODED_ELT (t2, i)))
 	    return 0;
 
 	return 1;
@@ -3567,7 +3575,7 @@ struct GTY((chain_next ("%h.next"), for_user)) constant_descriptor_rtx {
   rtx constant;
   HOST_WIDE_INT offset;
   hashval_t hash;
-  machine_mode mode;
+  fixed_size_mode mode;
   unsigned int align;
   int labelno;
   int mark;
@@ -3743,10 +3751,11 @@ simplify_subtraction (rtx x)
 }
 
 /* Given a constant rtx X, make (or find) a memory constant for its value
-   and return a MEM rtx to refer to it in memory.  */
+   and return a MEM rtx to refer to it in memory.  IN_MODE is the mode
+   of X.  */
 
 rtx
-force_const_mem (machine_mode mode, rtx x)
+force_const_mem (machine_mode in_mode, rtx x)
 {
   struct constant_descriptor_rtx *desc, tmp;
   struct rtx_constant_pool *pool;
@@ -3755,6 +3764,11 @@ force_const_mem (machine_mode mode, rtx x)
   hashval_t hash;
   unsigned int align;
   constant_descriptor_rtx **slot;
+  fixed_size_mode mode;
+
+  /* We can't force variable-sized objects to memory.  */
+  if (!is_a <fixed_size_mode> (in_mode, &mode))
+    return NULL_RTX;
 
   /* If we're not allowed to drop X into the constant pool, don't.  */
   if (targetm.cannot_force_const_mem (mode, x))
@@ -3784,11 +3798,8 @@ force_const_mem (machine_mode mode, rtx x)
   *slot = desc;
 
   /* Align the location counter as required by EXP's data type.  */
-  align = GET_MODE_ALIGNMENT (mode == VOIDmode ? word_mode : mode);
-
-  tree type = lang_hooks.types.type_for_mode (mode, 0);
-  if (type != NULL_TREE)
-    align = targetm.constant_alignment (make_tree (type, x), align);
+  machine_mode align_mode = (mode == VOIDmode ? word_mode : mode);
+  align = targetm.static_rtx_alignment (align_mode);
 
   pool->offset += (align / BITS_PER_UNIT) - 1;
   pool->offset &= ~ ((align / BITS_PER_UNIT) - 1);
@@ -3830,7 +3841,6 @@ force_const_mem (machine_mode mode, rtx x)
 
   /* Construct the MEM.  */
   desc->mem = def = gen_const_mem (mode, symbol);
-  set_mem_attributes (def, lang_hooks.types.type_for_mode (mode, 0), 1);
   set_mem_align (def, align);
 
   /* If we're dropping a label to the constant pool, make sure we
@@ -3864,7 +3874,7 @@ get_pool_constant_mark (rtx addr, bool *pmarked)
 
 /* Similar, return the mode.  */
 
-machine_mode
+fixed_size_mode
 get_pool_mode (const_rtx addr)
 {
   return SYMBOL_REF_CONSTANT (addr)->mode;
@@ -3884,7 +3894,7 @@ constant_pool_empty_p (void)
    in MODE with known alignment ALIGN.  */
 
 static void
-output_constant_pool_2 (machine_mode mode, rtx x, unsigned int align)
+output_constant_pool_2 (fixed_size_mode mode, rtx x, unsigned int align)
 {
   switch (GET_MODE_CLASS (mode))
     {
@@ -4613,6 +4623,7 @@ initializer_constant_valid_p_1 (tree value, tree endtype, tree *cache)
 	}
       return ret;
 
+    case POINTER_DIFF_EXPR:
     case MINUS_EXPR:
       if (TREE_CODE (endtype) == REAL_TYPE)
 	return NULL_TREE;
@@ -6521,6 +6532,7 @@ categorize_decl_for_section (const_tree decl, int reloc)
     }
   else if (VAR_P (decl))
     {
+      tree d = CONST_CAST_TREE (decl);
       if (bss_initializer_p (decl))
 	ret = SECCAT_BSS;
       else if (! TREE_READONLY (decl)
@@ -6541,7 +6553,17 @@ categorize_decl_for_section (const_tree decl, int reloc)
 	ret = reloc == 1 ? SECCAT_DATA_REL_RO_LOCAL : SECCAT_DATA_REL_RO;
       else if (reloc || flag_merge_constants < 2
 	       || ((flag_sanitize & SANITIZE_ADDRESS)
-		   && asan_protect_global (CONST_CAST_TREE (decl))))
+		   /* PR 81697: for architectures that use section anchors we
+		      need to ignore DECL_RTL_SET_P (decl) for string constants
+		      inside this asan_protect_global call because otherwise
+		      we'll wrongly put them into SECCAT_RODATA_MERGE_CONST
+		      section, set DECL_RTL (decl) later on and add DECL to
+		      protected globals via successive asan_protect_global
+		      calls.  In this scenario we'll end up with wrong
+		      alignment of these strings at runtime and possible ASan
+		      false positives.  */
+		   && asan_protect_global (d, use_object_blocks_p ()
+					      && use_blocks_for_decl_p (d))))
 	/* C and C++ don't allow different variables to share the same
 	   location.  -fmerge-all-constants allows even that (at the
 	   expense of not conforming).  */

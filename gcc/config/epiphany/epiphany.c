@@ -176,6 +176,9 @@ static rtx_insn *frame_insn (rtx);
 
 #undef TARGET_CONSTANT_ALIGNMENT
 #define TARGET_CONSTANT_ALIGNMENT epiphany_constant_alignment
+
+#undef TARGET_STARTING_FRAME_OFFSET
+#define TARGET_STARTING_FRAME_OFFSET epiphany_starting_frame_offset
 
 bool
 epiphany_is_interrupt_p (tree decl)
@@ -457,13 +460,14 @@ epiphany_init_reg_tables (void)
 
 static const struct attribute_spec epiphany_attribute_table[] =
 {
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler } */
-  { "interrupt",  0, 9, true,  false, false, epiphany_handle_interrupt_attribute, true },
-  { "forwarder_section", 1, 1, true, false, false, epiphany_handle_forwarder_attribute, false },
-  { "long_call",  0, 0, false, true, true, NULL, false },
-  { "short_call", 0, 0, false, true, true, NULL, false },
-  { "disinterrupt", 0, 0, false, true, true, NULL, true },
-  { NULL,         0, 0, false, false, false, NULL, false }
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
+       affects_type_identity, exclusions } */
+  { "interrupt",  0, 9, true,  false, false, epiphany_handle_interrupt_attribute, true, NULL },
+  { "forwarder_section", 1, 1, true, false, false, epiphany_handle_forwarder_attribute, false, NULL },
+  { "long_call",  0, 0, false, true, true, NULL, false, NULL },
+  { "short_call", 0, 0, false, true, true, NULL, false, NULL },
+  { "disinterrupt", 0, 0, false, true, true, NULL, true, NULL },
+  { NULL,         0, 0, false, false, false, NULL, false, NULL }
 };
 
 /* Handle an "interrupt" attribute; arguments as in
@@ -3026,6 +3030,14 @@ epiphany_constant_alignment (const_tree exp, HOST_WIDE_INT align)
   if (TREE_CODE (exp) == STRING_CST)
     return MAX (align, FASTEST_ALIGNMENT);
   return align;
+}
+
+/* Implement TARGET_STARTING_FRAME_OFFSET.  */
+
+static HOST_WIDE_INT
+epiphany_starting_frame_offset (void)
+{
+  return epiphany_stack_offset;
 }
 
 struct gcc_target targetm = TARGET_INITIALIZER;

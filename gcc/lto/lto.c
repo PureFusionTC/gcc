@@ -591,7 +591,7 @@ mentions_vars_p_decl_with_vis (tree t)
     return true;
 
   /* Accessor macro has side-effects, use field-name here. */
-  CHECK_NO_VAR (t->decl_with_vis.assembler_name);
+  CHECK_NO_VAR (DECL_ASSEMBLER_NAME_RAW (t));
   return false;
 }
 
@@ -1039,7 +1039,7 @@ compare_tree_sccs_1 (tree t1, tree t2, tree **map)
 
   if (CODE_CONTAINS_STRUCT (code, TS_INT_CST))
     {
-      if (!wi::eq_p (t1, t2))
+      if (wi::to_wide (t1) != wi::to_wide (t2))
 	return false;
     }
 
@@ -1065,6 +1065,12 @@ compare_tree_sccs_1 (tree t1, tree t2, tree **map)
 			TREE_FIXED_CST_PTR (t1), TREE_FIXED_CST_PTR (t2)))
       return false;
 
+  if (CODE_CONTAINS_STRUCT (code, TS_VECTOR))
+    {
+      compare_values (VECTOR_CST_LOG2_NPATTERNS);
+      compare_values (VECTOR_CST_NELTS_PER_PATTERN);
+    }
+
   if (CODE_CONTAINS_STRUCT (code, TS_DECL_COMMON))
     {
       compare_values (DECL_MODE);
@@ -1087,6 +1093,7 @@ compare_tree_sccs_1 (tree t1, tree t2, tree **map)
 	{
 	  compare_values (DECL_PACKED);
 	  compare_values (DECL_NONADDRESSABLE_P);
+	  compare_values (DECL_PADDING_P);
 	  compare_values (DECL_OFFSET_ALIGN);
 	}
       else if (code == VAR_DECL)
@@ -1165,6 +1172,7 @@ compare_tree_sccs_1 (tree t1, tree t2, tree **map)
 	compare_values (TYPE_NONALIASED_COMPONENT);
       if (AGGREGATE_TYPE_P (t1))
 	compare_values (TYPE_TYPELESS_STORAGE);
+      compare_values (TYPE_EMPTY_P);
       compare_values (TYPE_PACKED);
       compare_values (TYPE_RESTRICT);
       compare_values (TYPE_USER_ALIGN);
@@ -1279,11 +1287,12 @@ compare_tree_sccs_1 (tree t1, tree t2, tree **map)
 
   if (CODE_CONTAINS_STRUCT (code, TS_VECTOR))
     {
-      unsigned i;
       /* Note that the number of elements for EXPR has already been emitted
 	 in EXPR's header (see streamer_write_tree_header).  */
-      for (i = 0; i < VECTOR_CST_NELTS (t1); ++i)
-	compare_tree_edges (VECTOR_CST_ELT (t1, i), VECTOR_CST_ELT (t2, i));
+      unsigned int count = vector_cst_encoded_nelts (t1);
+      for (unsigned int i = 0; i < count; ++i)
+	compare_tree_edges (VECTOR_CST_ENCODED_ELT (t1, i),
+			    VECTOR_CST_ENCODED_ELT (t2, i));
     }
 
   if (CODE_CONTAINS_STRUCT (code, TS_COMPLEX))
@@ -1987,7 +1996,7 @@ create_subid_section_table (struct lto_section_slot *ls, splay_tree file_ids,
       file_data = ggc_alloc<lto_file_decl_data> ();
       memset(file_data, 0, sizeof (struct lto_file_decl_data));
       file_data->id = id;
-      file_data->section_hash_table = lto_obj_create_section_hash_table ();;
+      file_data->section_hash_table = lto_obj_create_section_hash_table ();
       lto_splay_tree_insert (file_ids, id, file_data);
 
       /* Maintain list in linker order */
@@ -2557,7 +2566,7 @@ lto_fixup_prevailing_decls (tree t)
 	}
       if (CODE_CONTAINS_STRUCT (code, TS_DECL_WITH_VIS))
 	{
-	  LTO_NO_PREVAIL (t->decl_with_vis.assembler_name);
+	  LTO_NO_PREVAIL (DECL_ASSEMBLER_NAME_RAW (t));
 	}
       if (CODE_CONTAINS_STRUCT (code, TS_DECL_NON_COMMON))
 	{

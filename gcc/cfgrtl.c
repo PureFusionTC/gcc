@@ -1117,7 +1117,7 @@ try_redirect_by_replacing_jump (edge e, basic_block target, bool in_cfglayout)
       if (tablejump_p (insn, &label, &table))
 	delete_insn_chain (label, table, false);
 
-      barrier = next_nonnote_insn (BB_END (src));
+      barrier = next_nonnote_nondebug_insn (BB_END (src));
       if (!barrier || !BARRIER_P (barrier))
 	emit_barrier_after (BB_END (src));
       else
@@ -1156,7 +1156,6 @@ try_redirect_by_replacing_jump (edge e, basic_block target, bool in_cfglayout)
     e->flags = 0;
 
   e->probability = profile_probability::always ();
-  e->count = src->count;
 
   if (e->dest != target)
     redirect_edge_succ (e, target);
@@ -1334,8 +1333,7 @@ fixup_partition_crossing (edge e)
   if (BB_PARTITION (e->src) != BB_PARTITION (e->dest))
     {
       e->flags |= EDGE_CROSSING;
-      if (JUMP_P (BB_END (e->src))
-	  && !CROSSING_JUMP_P (BB_END (e->src)))
+      if (JUMP_P (BB_END (e->src)))
 	CROSSING_JUMP_P (BB_END (e->src)) = 1;
     }
   else if (BB_PARTITION (e->src) == BB_PARTITION (e->dest))
@@ -1505,9 +1503,7 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
 	  int prob = XINT (note, 0);
 
 	  b->probability = profile_probability::from_reg_br_prob_note (prob);
-	  b->count = e->count.apply_probability (b->probability);
 	  e->probability -= e->probability;
-	  e->count -= b->count;
 	}
     }
 
@@ -1536,6 +1532,7 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
 
 	  basic_block bb = create_basic_block (BB_HEAD (e->dest), NULL,
 					       ENTRY_BLOCK_PTR_FOR_FN (cfun));
+	  bb->count = ENTRY_BLOCK_PTR_FOR_FN (cfun)->count;
 
 	  /* Change the existing edge's source to be the new block, and add
 	     a new edge from the entry block to the new block.  */
@@ -1615,7 +1612,7 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
   if (EDGE_COUNT (e->src->succs) >= 2 || abnormal_edge_flags || asm_goto_edge)
     {
       rtx_insn *new_head;
-      profile_count count = e->count;
+      profile_count count = e->count ();
       profile_probability probability = e->probability;
       /* Create the new structures.  */
 
@@ -1628,10 +1625,14 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
       else
 	new_head = BB_END (e->src);
       new_head = NEXT_INSN (new_head);
+      /* Make sure we don't split a call and its corresponding
+	 CALL_ARG_LOCATION note.  */
+      if (new_head && NOTE_P (new_head)
+	  && NOTE_KIND (new_head) == NOTE_INSN_CALL_ARG_LOCATION)
+	new_head = NEXT_INSN (new_head);
 
       jump_block = create_basic_block (new_head, NULL, e->src);
       jump_block->count = count;
-      jump_block->frequency = EDGE_FREQUENCY (e);
 
       /* Make sure new block ends up in correct hot/cold section.  */
 
@@ -1640,7 +1641,6 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
       /* Wire edge in.  */
       new_edge = make_edge (e->src, jump_block, EDGE_FALLTHRU);
       new_edge->probability = probability;
-      new_edge->count = count;
 
       /* Redirect old edge.  */
       redirect_edge_pred (e, jump_block);
@@ -1655,13 +1655,10 @@ force_nonfallthru_and_redirect (edge e, basic_block target, rtx jump_label)
       if (asm_goto_edge)
 	{
 	  new_edge->probability = new_edge->probability.apply_scale (1, 2);
-	  new_edge->count = new_edge->count.apply_scale (1, 2);
 	  jump_block->count = jump_block->count.apply_scale (1, 2);
-	  jump_block->frequency /= 2;
 	  edge new_edge2 = make_edge (new_edge->src, target,
 				      e->flags & ~EDGE_FALLTHRU);
 	  new_edge2->probability = probability - new_edge->probability;
-	  new_edge2->count = count - new_edge->count;
 	}
 
       new_bb = jump_block;
@@ -1753,7 +1750,7 @@ rtl_tidy_fallthru_edge (edge e)
      the head of block C and assert that we really do fall through.  */
 
   for (q = NEXT_INSN (BB_END (b)); q != BB_HEAD (c); q = NEXT_INSN (q))
-    if (INSN_P (q))
+    if (NONDEBUG_INSN_P (q))
       return;
 
   /* Remove what will soon cease being the jump insn from the source block.
@@ -2251,9 +2248,23 @@ void
 update_br_prob_note (basic_block bb)
 {
   rtx note;
-  if (!JUMP_P (BB_END (bb)) || !BRANCH_EDGE (bb)->probability.initialized_p ())
-    return;
   note = find_reg_note (BB_END (bb), REG_BR_PROB, NULL_RTX);
+  if (!JUMP_P (BB_END (bb)) || !BRANCH_EDGE (bb)->probability.initialized_p ())
+    {
+      if (note)
+	{
+	  rtx *note_link, this_rtx;
+
+	  note_link = &REG_NOTES (BB_END (bb));
+	  for (this_rtx = *note_link; this_rtx; this_rtx = XEXP (this_rtx, 1))
+	    if (this_rtx == note)
+	      {
+		*note_link = XEXP (this_rtx, 1);
+		break;
+	      }
+	}
+      return;
+    }
   if (!note
       || XINT (note, 0) == BRANCH_EDGE (bb)->probability.to_reg_br_prob_note ())
     return;
@@ -2274,11 +2285,11 @@ get_last_bb_insn (basic_block bb)
     end = table;
 
   /* Include any barriers that may follow the basic block.  */
-  tmp = next_nonnote_insn_bb (end);
+  tmp = next_nonnote_nondebug_insn_bb (end);
   while (tmp && BARRIER_P (tmp))
     {
       end = tmp;
-      tmp = next_nonnote_insn_bb (end);
+      tmp = next_nonnote_nondebug_insn_bb (end);
     }
 
   return end;
@@ -2894,7 +2905,7 @@ rtl_verify_fallthru (void)
 	  else
 	    for (insn = NEXT_INSN (BB_END (e->src)); insn != BB_HEAD (e->dest);
 		 insn = NEXT_INSN (insn))
-	      if (BARRIER_P (insn) || INSN_P (insn))
+	      if (BARRIER_P (insn) || NONDEBUG_INSN_P (insn))
 		{
 		  error ("verify_flow_info: Incorrect fallthru %i->%i",
 			 e->src->index, e->dest->index);
@@ -2916,7 +2927,7 @@ rtl_verify_bb_layout (void)
 {
   basic_block bb;
   int err = 0;
-  rtx_insn *x;
+  rtx_insn *x, *y;
   int num_bb_notes;
   rtx_insn * const rtx_first = get_insns ();
   basic_block last_bb_seen = ENTRY_BLOCK_PTR_FOR_FN (cfun), curr_bb = NULL;
@@ -2943,6 +2954,7 @@ rtl_verify_bb_layout (void)
 	    {
 	    case BARRIER:
 	    case NOTE:
+	    case DEBUG_INSN:
 	      break;
 
 	    case CODE_LABEL:
@@ -2961,7 +2973,8 @@ rtl_verify_bb_layout (void)
 
       if (JUMP_P (x)
 	  && returnjump_p (x) && ! condjump_p (x)
-	  && ! (next_nonnote_insn (x) && BARRIER_P (next_nonnote_insn (x))))
+	  && ! ((y = next_nonnote_nondebug_insn (x))
+		&& BARRIER_P (y)))
 	    fatal_insn ("return not followed by barrier", x);
 
       if (curr_bb && x == BB_END (curr_bb))
@@ -3155,7 +3168,6 @@ purge_dead_edges (basic_block bb)
       if (single_succ_p (bb))
 	{
 	  single_succ_edge (bb)->probability = profile_probability::always ();
-	  single_succ_edge (bb)->count = bb->count;
 	}
       else
 	{
@@ -3168,8 +3180,6 @@ purge_dead_edges (basic_block bb)
 	  b->probability = profile_probability::from_reg_br_prob_note
 					 (XINT (note, 0));
 	  f->probability = b->probability.invert ();
-	  b->count = bb->count.apply_probability (b->probability);
-	  f->count = bb->count.apply_probability (f->probability);
 	}
 
       return purged;
@@ -3221,7 +3231,6 @@ purge_dead_edges (basic_block bb)
   gcc_assert (single_succ_p (bb));
 
   single_succ_edge (bb)->probability = profile_probability::always ();
-  single_succ_edge (bb)->count = bb->count;
 
   if (dump_file)
     fprintf (dump_file, "Purged non-fallthru edges from bb %i\n",
@@ -3380,6 +3389,9 @@ skip_insns_after_block (basic_block bb)
 	{
 	case BARRIER:
 	  last_insn = insn;
+	  continue;
+
+	case DEBUG_INSN:
 	  continue;
 
 	case NOTE:
@@ -3633,7 +3645,6 @@ relink_block_chain (bool stay_in_cfglayout_mode)
 	    fprintf (dump_file, "compensation ");
 	  else
 	    fprintf (dump_file, "bb %i ", bb->index);
-	  fprintf (dump_file, " [%i]\n", bb->frequency);
 	}
     }
 
@@ -4135,7 +4146,8 @@ duplicate_insn_chain (rtx_insn *from, rtx_insn *to)
 	{
 	case DEBUG_INSN:
 	  /* Don't duplicate label debug insns.  */
-	  if (TREE_CODE (INSN_VAR_LOCATION_DECL (insn)) == LABEL_DECL)
+	  if (DEBUG_BIND_INSN_P (insn)
+	      && TREE_CODE (INSN_VAR_LOCATION_DECL (insn)) == LABEL_DECL)
 	    break;
 	  /* FALLTHRU */
 	case INSN:
@@ -4906,7 +4918,6 @@ rtl_flow_call_edges_add (sbitmap blocks)
 
 	      edge ne = make_edge (bb, EXIT_BLOCK_PTR_FOR_FN (cfun), EDGE_FAKE);
 	      ne->probability = profile_probability::guessed_never ();
-	      ne->count = profile_count::guessed_zero ();
 	    }
 
 	  if (insn == BB_HEAD (bb))
@@ -5039,14 +5050,13 @@ rtl_account_profile_record (basic_block bb, int after_pass,
   FOR_BB_INSNS (bb, insn)
     if (INSN_P (insn))
       {
-	record->size[after_pass]
-	  += insn_rtx_cost (PATTERN (insn), false);
+	record->size[after_pass] += insn_cost (insn, false);
 	if (bb->count.initialized_p ())
 	  record->time[after_pass]
-	    += insn_rtx_cost (PATTERN (insn), true) * bb->count.to_gcov_type ();
+	    += insn_cost (insn, true) * bb->count.to_gcov_type ();
 	else if (profile_status_for_fn (cfun) == PROFILE_GUESSED)
 	  record->time[after_pass]
-	    += insn_rtx_cost (PATTERN (insn), true) * bb->frequency;
+	    += insn_cost (insn, true) * bb->count.to_frequency (cfun);
       }
 }
 

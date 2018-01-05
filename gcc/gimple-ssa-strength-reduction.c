@@ -488,7 +488,8 @@ find_phi_def (tree base)
 
   c = base_cand_from_table (base);
 
-  if (!c || c->kind != CAND_PHI)
+  if (!c || c->kind != CAND_PHI
+      || SSA_NAME_OCCURS_IN_ABNORMAL_PHI (gimple_phi_result (c->cand_stmt)))
     return 0;
 
   return c->cand_num;
@@ -555,6 +556,11 @@ find_basis_for_base_expr (slsr_cand_t c, tree base_expr)
 	  || !dominated_by_p (CDI_DOMINATORS,
 			      gimple_bb (c->cand_stmt),
 			      gimple_bb (one_basis->cand_stmt)))
+	continue;
+
+      tree lhs = gimple_assign_lhs (one_basis->cand_stmt);
+      if (lhs && TREE_CODE (lhs) == SSA_NAME
+	  && SSA_NAME_OCCURS_IN_ABNORMAL_PHI (lhs))
 	continue;
 
       if (!basis || basis->cand_num < one_basis->cand_num)
@@ -3077,7 +3083,17 @@ analyze_increments (slsr_cand_t first_dep, machine_mode mode, bool speed)
       else if (first_dep->kind == CAND_MULT)
 	{
 	  int cost = mult_by_coeff_cost (incr, mode, speed);
-	  int repl_savings = mul_cost (speed, mode) - add_cost (speed, mode);
+	  int repl_savings;
+
+	  if (tree_fits_shwi_p (first_dep->stride))
+	    {
+	      HOST_WIDE_INT hwi_stride = tree_to_shwi (first_dep->stride);
+	      repl_savings = mult_by_coeff_cost (hwi_stride, mode, speed);
+	    }
+	  else
+	    repl_savings = mul_cost (speed, mode);
+	  repl_savings -= add_cost (speed, mode);
+
 	  if (speed)
 	    cost = lowest_cost_path (cost, repl_savings, first_dep,
 				     incr_vec[i].incr, COUNT_PHIS);
@@ -3412,7 +3428,7 @@ insert_initializers (slsr_cand_t c)
 		  gsi_insert_after (&gsi, cast_stmt, GSI_NEW_STMT);
 		  gimple_set_location (cast_stmt, loc);
 		}
-	      gsi_insert_after (&gsi, init_stmt, GSI_SAME_STMT);
+	      gsi_insert_after (&gsi, init_stmt, GSI_NEW_STMT);
 	    }
 
 	  gimple_set_location (init_stmt, gimple_location (basis_stmt));

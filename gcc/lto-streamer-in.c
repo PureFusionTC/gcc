@@ -360,6 +360,8 @@ lto_input_tree_ref (struct lto_input_block *ib, struct data_in *data_in,
     case LTO_label_decl_ref:
     case LTO_translation_unit_decl_ref:
     case LTO_namelist_decl_ref:
+      if (!data_in->file_data->current_decl_state)
+	      printf("tag %d\n", tag);
       ix_u = streamer_read_uhwi (ib);
       result = lto_file_decl_data_get_var_decl (data_in->file_data, ix_u);
       break;
@@ -715,8 +717,7 @@ make_new_block (struct function *fn, unsigned int index)
 
 static void
 input_cfg (struct lto_input_block *ib, struct data_in *data_in,
-	   struct function *fn,
-	   int count_materialization_scale)
+	   struct function *fn)
 {
   unsigned int bb_count;
   basic_block p_bb;
@@ -756,13 +757,10 @@ input_cfg (struct lto_input_block *ib, struct data_in *data_in,
 	  unsigned int edge_flags;
 	  basic_block dest;
 	  profile_probability probability;
-	  profile_count count;
 	  edge e;
 
 	  dest_index = streamer_read_uhwi (ib);
 	  probability = profile_probability::stream_in (ib);
-	  count = profile_count::stream_in (ib).apply_scale
-			 (count_materialization_scale, REG_BR_PROB_BASE);
 	  edge_flags = streamer_read_uhwi (ib);
 
 	  dest = BASIC_BLOCK_FOR_FN (fn, dest_index);
@@ -772,7 +770,6 @@ input_cfg (struct lto_input_block *ib, struct data_in *data_in,
 
 	  e = make_edge (bb, dest, edge_flags);
 	  e->probability = probability;
-	  e->count = count;
 	}
 
       index = streamer_read_hwi (ib);
@@ -830,6 +827,7 @@ input_cfg (struct lto_input_block *ib, struct data_in *data_in,
 
       /* Read OMP SIMD related info.  */
       loop->safelen = streamer_read_hwi (ib);
+      loop->unroll = streamer_read_hwi (ib);
       loop->dont_vectorize = streamer_read_hwi (ib);
       loop->force_vectorize = streamer_read_hwi (ib);
       loop->simduid = stream_read_tree (ib, data_in);
@@ -1070,7 +1068,7 @@ input_function (tree fn_decl, struct data_in *data_in,
   if (!node)
     node = cgraph_node::create (fn_decl);
   input_struct_function_base (fn, data_in, ib);
-  input_cfg (ib_cfg, data_in, fn, node->count_materialization_scale);
+  input_cfg (ib_cfg, data_in, fn);
 
   /* Read all the SSA names.  */
   input_ssa_names (ib, data_in, fn);
@@ -1130,7 +1128,10 @@ input_function (tree fn_decl, struct data_in *data_in,
 	     Similarly remove all IFN_*SAN_* internal calls   */
 	  if (!flag_wpa)
 	    {
-	      if (!MAY_HAVE_DEBUG_STMTS && is_gimple_debug (stmt))
+	      if (is_gimple_debug (stmt)
+		  && (gimple_debug_nonbind_marker_p (stmt)
+		      ? !MAY_HAVE_DEBUG_MARKER_STMTS
+		      : !MAY_HAVE_DEBUG_BIND_STMTS))
 		remove = true;
 	      if (is_gimple_call (stmt)
 		  && gimple_call_internal_p (stmt))
@@ -1184,6 +1185,13 @@ input_function (tree fn_decl, struct data_in *data_in,
 	    {
 	      gsi_next (&bsi);
 	      stmts[gimple_uid (stmt)] = stmt;
+
+	      /* Remember that the input function has begin stmt
+		 markers, so that we know to expect them when emitting
+		 debug info.  */
+	      if (!cfun->debug_nonbind_markers
+		  && gimple_debug_nonbind_marker_p (stmt))
+		cfun->debug_nonbind_markers = true;
 	    }
 	}
     }
@@ -1197,6 +1205,7 @@ input_function (tree fn_decl, struct data_in *data_in,
     gimple_set_body (fn_decl, bb_seq (ei_edge (ei)->dest));
   }
 
+  update_max_bb_count ();
   fixup_call_stmt_edges (node, stmts);
   execute_all_ipa_stmt_fixups (node, stmts);
 

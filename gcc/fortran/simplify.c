@@ -29,6 +29,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "constructor.h"
 #include "version.h"	/* For version_string.  */
 
+/* Prototypes.  */
+
+static void min_max_choose (gfc_expr *, gfc_expr *, int);
 
 gfc_expr gfc_bad_expr;
 
@@ -227,7 +230,8 @@ convert_boz (gfc_expr *x, int kind)
 }
 
 
-/* Test that the expression is an constant array.  */
+/* Test that the expression is an constant array, simplifying if
+   we are dealing with a parameter array.  */
 
 static bool
 is_constant_array_expr (gfc_expr *e)
@@ -236,6 +240,10 @@ is_constant_array_expr (gfc_expr *e)
 
   if (e == NULL)
     return true;
+
+  if (e->expr_type == EXPR_VARIABLE && e->rank > 0
+      && e->symtree->n.sym->attr.flavor == FL_PARAMETER)
+    gfc_simplify_expr (e, 1);
 
   if (e->expr_type != EXPR_ARRAY || !gfc_is_constant_expr (e))
     return false;
@@ -431,7 +439,8 @@ typedef gfc_expr* (*transformational_op)(gfc_expr*, gfc_expr*);
    Interface and implementation mimics arith functions as
    gfc_add, gfc_multiply, etc.  */
 
-static gfc_expr* gfc_count (gfc_expr *op1, gfc_expr *op2)
+static gfc_expr *
+gfc_count (gfc_expr *op1, gfc_expr *op2)
 {
   gfc_expr *result;
 
@@ -661,7 +670,7 @@ simplify_transformation (gfc_expr *array, gfc_expr *dim, gfc_expr *mask,
 
   result = transformational_result (array, dim, array->ts.type,
 				    array->ts.kind, &array->where);
-  init_result_expr (result, init_val, NULL);
+  init_result_expr (result, init_val, array);
 
   return !dim || array->rank == 1 ?
     simplify_transformation_to_scalar (result, array, mask, op) :
@@ -4534,67 +4543,41 @@ gfc_simplify_max (gfc_expr *e)
   return simplify_min_max (e, 1);
 }
 
-
-/* This is a simplified version of simplify_min_max to provide
-   simplification of minval and maxval for a vector.  */
+/* Helper function for gfc_simplify_minval.  */
 
 static gfc_expr *
-simplify_minval_maxval (gfc_expr *expr, int sign)
+gfc_min (gfc_expr *op1, gfc_expr *op2)
 {
-  gfc_constructor *c, *extremum;
-  gfc_intrinsic_sym * specific;
-
-  extremum = NULL;
-  specific = expr->value.function.isym;
-
-  for (c = gfc_constructor_first (expr->value.constructor);
-       c; c = gfc_constructor_next (c))
-    {
-      if (c->expr->expr_type != EXPR_CONSTANT)
-	return NULL;
-
-      if (extremum == NULL)
-	{
-	  extremum = c;
-	  continue;
-	}
-
-      min_max_choose (c->expr, extremum->expr, sign);
-     }
-
-  if (extremum == NULL)
-    return NULL;
-
-  /* Convert to the correct type and kind.  */
-  if (expr->ts.type != BT_UNKNOWN)
-    return gfc_convert_constant (extremum->expr,
-	expr->ts.type, expr->ts.kind);
-
-  if (specific->ts.type != BT_UNKNOWN)
-    return gfc_convert_constant (extremum->expr,
-	specific->ts.type, specific->ts.kind);
-
-  return gfc_copy_expr (extremum->expr);
+  min_max_choose (op1, op2, -1);
+  gfc_free_expr (op1);
+  return op2;
 }
 
+/* Simplify minval for constant arrays.  */
 
 gfc_expr *
 gfc_simplify_minval (gfc_expr *array, gfc_expr* dim, gfc_expr *mask)
 {
-  if (array->expr_type != EXPR_ARRAY || array->rank != 1 || dim || mask)
-    return NULL;
-
-  return simplify_minval_maxval (array, -1);
+  return simplify_transformation (array, dim, mask, INT_MAX, gfc_min);
 }
 
+/* Helper function for gfc_simplify_maxval.  */
+
+static gfc_expr *
+gfc_max (gfc_expr *op1, gfc_expr *op2)
+{
+  min_max_choose (op1, op2, 1);
+  gfc_free_expr (op1);
+  return op2;
+}
+
+
+/* Simplify maxval for constant arrays.  */
 
 gfc_expr *
 gfc_simplify_maxval (gfc_expr *array, gfc_expr* dim, gfc_expr *mask)
 {
-  if (array->expr_type != EXPR_ARRAY || array->rank != 1 || dim || mask)
-    return NULL;
-
-  return simplify_minval_maxval (array, 1);
+  return simplify_transformation (array, dim, mask, INT_MIN, gfc_max);
 }
 
 
@@ -6571,8 +6554,7 @@ gfc_simplify_transfer (gfc_expr *source, gfc_expr *mold, gfc_expr *size)
     return NULL;
 
   /* Calculate the size of the source.  */
-  if (source->expr_type == EXPR_ARRAY
-      && !gfc_array_size (source, &tmp))
+  if (source->expr_type == EXPR_ARRAY && !gfc_array_size (source, &tmp))
     gfc_internal_error ("Failure getting length of a constant array.");
 
   /* Create an empty new expression with the appropriate characteristics.  */
@@ -6580,7 +6562,7 @@ gfc_simplify_transfer (gfc_expr *source, gfc_expr *mold, gfc_expr *size)
 				  &source->where);
   result->ts = mold->ts;
 
-  mold_element = mold->expr_type == EXPR_ARRAY
+  mold_element = (mold->expr_type == EXPR_ARRAY && mold->value.constructor)
 		 ? gfc_constructor_first (mold->value.constructor)->expr
 		 : mold;
 
@@ -7124,6 +7106,13 @@ gfc_convert_constant (gfc_expr *e, bt type, int kind)
 	default:
 	  goto oops;
 	}
+      break;
+
+    case BT_CHARACTER:
+      if (type == BT_CHARACTER)
+	f = gfc_character2character;
+      else
+	goto oops;
       break;
 
     default:

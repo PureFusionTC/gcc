@@ -83,12 +83,11 @@ along with GCC; see the file COPYING3.  If not see
 #include "edit-context.h"
 #include "tree-pass.h"
 #include "dumpfile.h"
+#include "ipa-fnsummary.h"
 
 #if defined(DBX_DEBUGGING_INFO) || defined(XCOFF_DEBUGGING_INFO)
 #include "dbxout.h"
 #endif
-
-#include "sdbout.h"
 
 #ifdef XCOFF_DEBUGGING_INFO
 #include "xcoffout.h"		/* Needed for external data declarations. */
@@ -526,10 +525,9 @@ compile_file (void)
       /* Do dbx symbols.  */
       timevar_push (TV_SYMOUT);
 
-    #if defined DWARF2_DEBUGGING_INFO || defined DWARF2_UNWIND_INFO
-      if (dwarf2out_do_frame ())
-	dwarf2out_frame_finish ();
-    #endif
+#if defined DWARF2_DEBUGGING_INFO || defined DWARF2_UNWIND_INFO
+      dwarf2out_frame_finish ();
+#endif
 
       (*debug_hooks->finish) (main_input_filename);
       timevar_pop (TV_SYMOUT);
@@ -1277,6 +1275,32 @@ process_options (void)
 	   "-floop-parallelize-all)");
 #endif
 
+  if (flag_cf_protection != CF_NONE
+      && !(flag_cf_protection & CF_SET))
+    {
+      if (flag_cf_protection == CF_FULL)
+	{
+	  error_at (UNKNOWN_LOCATION,
+		    "%<-fcf-protection=full%> is not supported for this "
+		    "target");
+	  flag_cf_protection = CF_NONE;
+	}
+      if (flag_cf_protection == CF_BRANCH)
+	{
+	  error_at (UNKNOWN_LOCATION,
+		    "%<-fcf-protection=branch%> is not supported for this "
+		    "target");
+	  flag_cf_protection = CF_NONE;
+	}
+      if (flag_cf_protection == CF_RETURN)
+	{
+	  error_at (UNKNOWN_LOCATION,
+		    "%<-fcf-protection=return%> is not supported for this "
+		    "target");
+	  flag_cf_protection = CF_NONE;
+	}
+    }
+
   if (flag_check_pointer_bounds)
     {
       if (targetm.chkp_bound_mode () == VOIDmode)
@@ -1441,8 +1465,6 @@ process_options (void)
   else if (write_symbols == XCOFF_DEBUG)
     debug_hooks = &xcoff_debug_hooks;
 #endif
-  else if (SDB_DEBUGGING_INFO && write_symbols == SDB_DEBUG)
-    debug_hooks = &sdb_debug_hooks;
 #ifdef DWARF2_DEBUGGING_INFO
   else if (write_symbols == DWARF2_DEBUG)
     debug_hooks = &dwarf2_debug_hooks;
@@ -1513,6 +1535,10 @@ process_options (void)
       && (flag_selective_scheduling || flag_selective_scheduling2))
     warning_at (UNKNOWN_LOCATION, 0,
 		"var-tracking-assignments changes selective scheduling");
+
+  if (debug_nonbind_markers_p == AUTODETECT_VALUE)
+    debug_nonbind_markers_p = optimize && debug_info_level >= DINFO_LEVEL_NORMAL
+      && (write_symbols == DWARF2_DEBUG || write_symbols == VMS_AND_DWARF2_DEBUG);
 
   if (flag_tree_cselim == AUTODETECT_VALUE)
     {
@@ -2186,7 +2212,7 @@ toplev::main (int argc, char **argv)
     {
       gcc_assert (global_dc->edit_context_ptr);
 
-      pretty_printer (pp);
+      pretty_printer pp;
       pp_show_color (&pp) = pp_show_color (global_dc->printer);
       global_dc->edit_context_ptr->print_diff (&pp, true);
       pp_flush (&pp);
@@ -2214,6 +2240,7 @@ toplev::finalize (void)
 
   /* Needs to be called before cgraph_c_finalize since it uses symtab.  */
   ipa_reference_c_finalize ();
+  ipa_fnsummary_c_finalize ();
 
   cgraph_c_finalize ();
   cgraphunit_c_finalize ();

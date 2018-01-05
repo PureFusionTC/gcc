@@ -146,9 +146,10 @@ static inline bool current_function_has_lr_slot (void);
 static const struct attribute_spec visium_attribute_table[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  {"interrupt", 0, 0, true, false, false, visium_handle_interrupt_attr, false},
-  {NULL, 0, 0, false, false, false, NULL, false}
+       affects_type_identity, exclusions } */
+  {"interrupt", 0, 0, true, false, false, visium_handle_interrupt_attr, false,
+   NULL},
+  {NULL, 0, 0, false, false, false, NULL, false, NULL},
 };
 
 static struct machine_function *visium_init_machine_status (void);
@@ -2938,12 +2939,6 @@ visium_select_cc_mode (enum rtx_code code, rtx op0, rtx op1)
       /* This is a btst, the result is in C instead of Z.  */
       return CCCmode;
 
-    case CONST_INT:
-      /* This is a degenerate case, typically an uninitialized variable.  */
-      gcc_assert (op0 == constm1_rtx);
-
-      /* ... fall through ... */
-
     case REG:
     case AND:
     case IOR:
@@ -2958,6 +2953,17 @@ visium_select_cc_mode (enum rtx_code code, rtx op0, rtx op1)
 	 will set the C flag.  But the C flag is relevant only for
 	 the unsigned comparison operators and they are eliminated
 	 when applied to a comparison with zero.  */
+      return CCmode;
+
+    /* ??? Cater to the junk RTXes sent by try_merge_compare.  */
+    case ASM_OPERANDS:
+    case CALL:
+    case CONST_INT:
+    case LO_SUM:
+    case HIGH:
+    case MEM:
+    case UNSPEC:
+    case ZERO_EXTEND:
       return CCmode;
 
     default:

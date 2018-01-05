@@ -1710,7 +1710,7 @@ open_base_files (void)
       "backend.h", "predict.h", "tree.h",
       "rtl.h", "gimple.h", "fold-const.h", "insn-codes.h", "splay-tree.h",
       "alias.h", "insn-config.h", "flags.h", "expmed.h", "dojump.h",
-      "explow.h", "calls.h", "cilk.h", "memmodel.h", "emit-rtl.h", "varasm.h",
+      "explow.h", "calls.h", "memmodel.h", "emit-rtl.h", "varasm.h",
       "stmt.h", "expr.h", "alloc-pool.h", "cselib.h", "insn-addr.h",
       "optabs.h", "libfuncs.h", "debug.h", "internal-fn.h", "gimple-fold.h",
       "tree-eh.h", "gimple-iterator.h", "gimple-ssa.h", "tree-cfg.h",
@@ -5197,6 +5197,7 @@ main (int argc, char **argv)
       POS_HERE (do_scalar_typedef ("JCF_u2", &pos));
       POS_HERE (do_scalar_typedef ("void", &pos));
       POS_HERE (do_scalar_typedef ("machine_mode", &pos));
+      POS_HERE (do_scalar_typedef ("fixed_size_mode", &pos));
       POS_HERE (do_typedef ("PTR", 
 			    create_pointer (resolve_typedef ("void", &pos)),
 			    &pos));

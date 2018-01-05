@@ -360,6 +360,7 @@ rl78_option_override (void)
   if (TARGET_ES0
       && strcmp (lang_hooks.name, "GNU C")
       && strcmp (lang_hooks.name, "GNU C11")
+      && strcmp (lang_hooks.name, "GNU C17")
       && strcmp (lang_hooks.name, "GNU C89")
       && strcmp (lang_hooks.name, "GNU C99")
       /* Compiling with -flto results in a language of GNU GIMPLE being used... */
@@ -857,16 +858,16 @@ rl78_handle_saddr_attribute (tree * node,
 const struct attribute_spec rl78_attribute_table[] =
 {
   /* Name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-     affects_type_identity.  */
+     affects_type_identity, exclusions.  */
   { "interrupt",      0, 0, true, false, false, rl78_handle_func_attribute,
-    false },
+    false, NULL },
   { "brk_interrupt",  0, 0, true, false, false, rl78_handle_func_attribute,
-    false },
+    false, NULL },
   { "naked",          0, 0, true, false, false, rl78_handle_naked_attribute,
-    false },
+    false, NULL },
   { "saddr",          0, 0, true, false, false, rl78_handle_saddr_attribute,
-    false },
-  { NULL,             0, 0, false, false, false, NULL, false }
+    false, NULL },
+  { NULL,             0, 0, false, false, false, NULL, false, NULL }
 };
 
 
@@ -4789,6 +4790,45 @@ rl78_addsi3_internal (rtx * operands, unsigned int alternative)
     default:
       gcc_unreachable ();
     }
+}
+
+rtx
+rl78_emit_libcall (const char *name, enum rtx_code code,
+                   enum machine_mode dmode, enum machine_mode smode,
+                   int noperands, rtx *operands)
+{
+  rtx ret;
+  rtx_insn *insns;
+  rtx libcall;
+  rtx equiv;
+
+  start_sequence ();
+  libcall = gen_rtx_SYMBOL_REF (Pmode, name);
+
+  switch (noperands)
+    {
+    case 2:
+      ret = emit_library_call_value (libcall, NULL_RTX, LCT_CONST,
+                                     dmode, operands[1], smode);
+      equiv = gen_rtx_fmt_e (code, dmode, operands[1]);
+      break;
+
+    case 3:
+      ret = emit_library_call_value (libcall, NULL_RTX,
+                                     LCT_CONST, dmode,
+                                     operands[1], smode, operands[2],
+                                     smode);
+      equiv = gen_rtx_fmt_ee (code, dmode, operands[1], operands[2]);
+      break;
+
+    default:
+      gcc_unreachable ();
+    }
+
+  insns = get_insns ();
+  end_sequence ();
+  emit_libcall_block (insns, operands[0], ret, equiv);
+  return ret;
 }
 
 

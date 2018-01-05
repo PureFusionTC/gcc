@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "explow.h"
 #include "expr.h"
 #include "langhooks.h"
+#include "tree-vector-builder.h"
 
 struct target_expmed default_target_expmed;
 #if SWITCHABLE_TARGET
@@ -506,12 +507,13 @@ lowpart_bit_field_p (unsigned HOST_WIDE_INT bitnum,
 		     unsigned HOST_WIDE_INT bitsize,
 		     machine_mode struct_mode)
 {
+  unsigned HOST_WIDE_INT regsize = REGMODE_NATURAL_SIZE (struct_mode);
   if (BYTES_BIG_ENDIAN)
     return (bitnum % BITS_PER_UNIT == 0
 	    && (bitnum + bitsize == GET_MODE_BITSIZE (struct_mode)
-		|| (bitnum + bitsize) % BITS_PER_WORD == 0));
+		|| (bitnum + bitsize) % (regsize * BITS_PER_UNIT) == 0));
   else
-    return bitnum % BITS_PER_WORD == 0;
+    return bitnum % (regsize * BITS_PER_UNIT) == 0;
 }
 
 /* Return true if -fstrict-volatile-bitfields applies to an access of OP0
@@ -2337,12 +2339,10 @@ expand_shift_1 (enum tree_code code, machine_mode mode, rtx shifted,
   optab lrotate_optab = rotl_optab;
   optab rrotate_optab = rotr_optab;
   machine_mode op1_mode;
-  machine_mode scalar_mode = mode;
+  scalar_mode scalar_mode = GET_MODE_INNER (mode);
   int attempt;
   bool speed = optimize_insn_for_speed_p ();
 
-  if (VECTOR_MODE_P (mode))
-    scalar_mode = GET_MODE_INNER (mode);
   op1 = amount;
   op1_mode = GET_MODE (op1);
 
@@ -3285,7 +3285,7 @@ expand_mult_const (machine_mode mode, rtx op0, HOST_WIDE_INT val,
 
 rtx
 expand_mult (machine_mode mode, rtx op0, rtx op1, rtx target,
-	     int unsignedp)
+	     int unsignedp, bool no_libcall)
 {
   enum mult_variant variant;
   struct algorithm algorithm;
@@ -3421,14 +3421,16 @@ expand_mult (machine_mode mode, rtx op0, rtx op1, rtx target,
     {
       op0 = force_reg (GET_MODE (op0), op0);
       return expand_binop (mode, add_optab, op0, op0,
-			   target, unsignedp, OPTAB_LIB_WIDEN);
+			   target, unsignedp,
+			   no_libcall ? OPTAB_WIDEN : OPTAB_LIB_WIDEN);
     }
 
   /* This used to use umul_optab if unsigned, but for non-widening multiply
      there is no difference between signed and unsigned.  */
   op0 = expand_binop (mode, do_trapv ? smulv_optab : smul_optab,
-		      op0, op1, target, unsignedp, OPTAB_LIB_WIDEN);
-  gcc_assert (op0);
+		      op0, op1, target, unsignedp,
+		      no_libcall ? OPTAB_WIDEN : OPTAB_LIB_WIDEN);
+  gcc_assert (op0 || no_libcall);
   return op0;
 }
 
@@ -3701,7 +3703,7 @@ expmed_mult_highpart_optab (scalar_int_mode mode, rtx op0, rtx op1,
 
   /* Try widening multiplication.  */
   moptab = unsignedp ? umul_widen_optab : smul_widen_optab;
-  if (widening_optab_handler (moptab, wider_mode, mode) != CODE_FOR_nothing
+  if (convert_optab_handler (moptab, wider_mode, mode) != CODE_FOR_nothing
       && mul_widen_cost (speed, wider_mode) < max_cost)
     {
       tem = expand_binop (wider_mode, moptab, op0, narrow_op1, 0,
@@ -3740,7 +3742,7 @@ expmed_mult_highpart_optab (scalar_int_mode mode, rtx op0, rtx op1,
 
   /* Try widening multiplication of opposite signedness, and adjust.  */
   moptab = unsignedp ? smul_widen_optab : umul_widen_optab;
-  if (widening_optab_handler (moptab, wider_mode, mode) != CODE_FOR_nothing
+  if (convert_optab_handler (moptab, wider_mode, mode) != CODE_FOR_nothing
       && size - 1 < BITS_PER_WORD
       && (mul_widen_cost (speed, wider_mode)
 	  + 2 * shift_cost (speed, mode, size-1)
@@ -5183,14 +5185,14 @@ make_tree (tree type, rtx x)
 	int i;
 
 	/* Build a tree with vector elements.  */
-	auto_vec<tree, 32> elts (units);
+	tree_vector_builder elts (type, units, 1);
 	for (i = 0; i < units; ++i)
 	  {
 	    rtx elt = CONST_VECTOR_ELT (x, i);
 	    elts.quick_push (make_tree (itype, elt));
 	  }
 
-	return build_vector (type, elts);
+	return elts.build ();
       }
 
     case PLUS:
@@ -5246,7 +5248,15 @@ make_tree (tree type, rtx x)
       return fold_convert (type, make_tree (t, XEXP (x, 0)));
 
     case CONST:
-      return make_tree (type, XEXP (x, 0));
+      {
+	rtx op = XEXP (x, 0);
+	if (GET_CODE (op) == VEC_DUPLICATE)
+	  {
+	    tree elt_tree = make_tree (TREE_TYPE (type), XEXP (op, 0));
+	    return build_vector_from_val (type, elt_tree);
+	  }
+	return make_tree (type, op);
+      }
 
     case SYMBOL_REF:
       t = SYMBOL_REF_DECL (x);

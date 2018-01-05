@@ -781,6 +781,10 @@ create_modes (void)
 #endif
 }
 
+#ifndef NUM_POLY_INT_COEFFS
+#define NUM_POLY_INT_COEFFS 1
+#endif
+
 /* Processing.  */
 
 /* Sort a list of modes into the order needed for the WIDER field:
@@ -880,7 +884,7 @@ calc_wider_mode (void)
 	  for (i = 0, m = modes[c]; m; i++, m = m->next)
 	    sortbuf[i] = m;
 
-	  qsort (sortbuf, i, sizeof (struct mode_data *), cmp_modes);
+	  (qsort) (sortbuf, i, sizeof (struct mode_data *), cmp_modes);
 
 	  sortbuf[i] = 0;
 	  for (j = 0; j < i; j++)
@@ -1245,6 +1249,8 @@ enum machine_mode\n{");
       n_int_n_ents ++;
 
   printf ("#define NUM_INT_N_ENTS %d\n", n_int_n_ents);
+
+  printf ("#define NUM_POLY_INT_COEFFS %d\n", NUM_POLY_INT_COEFFS);
 
   puts ("\
 \n\

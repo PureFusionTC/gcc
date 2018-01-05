@@ -451,7 +451,7 @@ read_block_form (st_parameter_dt *dtp, int *nbytes)
 	  /* For preconnected units with default record length, set bytes left
 	   to unit record length and proceed, otherwise error.  */
 	  if (dtp->u.p.current_unit->unit_number == options.stdin_unit
-	      && dtp->u.p.current_unit->recl == DEFAULT_RECL)
+	      && dtp->u.p.current_unit->recl == default_recl)
             dtp->u.p.current_unit->bytes_left = dtp->u.p.current_unit->recl;
 	  else
 	    {
@@ -757,7 +757,7 @@ write_block (st_parameter_dt *dtp, int length)
 		       == options.stdout_unit
 		       || dtp->u.p.current_unit->unit_number
 		       == options.stderr_unit)
-		      && dtp->u.p.current_unit->recl == DEFAULT_RECL))
+		      && dtp->u.p.current_unit->recl == default_recl))
 	    dtp->u.p.current_unit->bytes_left = dtp->u.p.current_unit->recl;
 	  else
 	    {
@@ -2671,7 +2671,7 @@ data_transfer_init (st_parameter_dt *dtp, int read_flag)
 
   dtp->u.p.ionml = ionml;
   dtp->u.p.mode = read_flag ? READING : WRITING;
-
+  dtp->u.p.namelist_mode = 0;
   dtp->u.p.cc.len = 0;
 
   if ((dtp->common.flags & IOPARM_LIBRETURN_MASK) != IOPARM_LIBRETURN_OK)
@@ -2723,8 +2723,6 @@ data_transfer_init (st_parameter_dt *dtp, int read_flag)
       if (conv == GFC_CONVERT_NONE)
 	conv = compile_options.convert;
 
-      /* We use big_endian, which is 0 on little-endian machines
-	 and 1 on big-endian machines.  */
       switch (conv)
 	{
 	case GFC_CONVERT_NATIVE:
@@ -2732,11 +2730,11 @@ data_transfer_init (st_parameter_dt *dtp, int read_flag)
 	  break;
 
 	case GFC_CONVERT_BIG:
-	  conv = big_endian ? GFC_CONVERT_NATIVE : GFC_CONVERT_SWAP;
+	  conv = __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ ? GFC_CONVERT_NATIVE : GFC_CONVERT_SWAP;
 	  break;
 
 	case GFC_CONVERT_LITTLE:
-	  conv = big_endian ? GFC_CONVERT_SWAP : GFC_CONVERT_NATIVE;
+	  conv = __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ ? GFC_CONVERT_SWAP : GFC_CONVERT_NATIVE;
 	  break;
 
 	default:
@@ -2766,6 +2764,8 @@ data_transfer_init (st_parameter_dt *dtp, int read_flag)
       else
 	dtp->u.p.current_unit->has_size = false;
     }
+  else if (dtp->u.p.current_unit->internal_unit_kind > 0)
+    dtp->u.p.unit_is_internal = 1;
 
   /* Check the action.  */
 
@@ -3290,7 +3290,7 @@ next_array_record (st_parameter_dt *dtp, array_loop_spec *ls, int *finished)
    position.  */
 
 static void
-skip_record (st_parameter_dt *dtp, ssize_t bytes)
+skip_record (st_parameter_dt *dtp, gfc_offset bytes)
 {
   ssize_t rlength, readb;
 #define MAX_READ 4096
@@ -3367,7 +3367,6 @@ static void
 next_record_r (st_parameter_dt *dtp, int done)
 {
   gfc_offset record;
-  int bytes_left;
   char p;
   int cc;
 
@@ -3419,7 +3418,7 @@ next_record_r (st_parameter_dt *dtp, int done)
 	    }
 	  else
 	    {
-	      bytes_left = (int) dtp->u.p.current_unit->bytes_left;
+	      gfc_offset bytes_left = dtp->u.p.current_unit->bytes_left;
 	      bytes_left = min_off (bytes_left,
 		      ssize (dtp->u.p.current_unit->s)
 		      - stell (dtp->u.p.current_unit->s));
@@ -3590,12 +3589,13 @@ next_record_w_unf (st_parameter_dt *dtp, int next_subrecord)
 /* Utility function like memset() but operating on streams. Return
    value is same as for POSIX write().  */
 
-static ssize_t
-sset (stream *s, int c, ssize_t nbyte)
+static gfc_offset
+sset (stream *s, int c, gfc_offset nbyte)
 {
 #define WRITE_CHUNK 256
   char p[WRITE_CHUNK];
-  ssize_t bytes_left, trans;
+  gfc_offset bytes_left;
+  ssize_t trans;
 
   if (nbyte < WRITE_CHUNK)
     memset (p, c, nbyte);
@@ -3645,11 +3645,10 @@ next_record_cc (st_parameter_dt *dtp)
 static void
 next_record_w (st_parameter_dt *dtp, int done)
 {
-  gfc_offset m, record, max_pos;
-  int length;
+  gfc_offset max_pos_off;
 
   /* Zero counters for X- and T-editing.  */
-  max_pos = dtp->u.p.max_pos;
+  max_pos_off = dtp->u.p.max_pos;
   dtp->u.p.max_pos = dtp->u.p.skips = dtp->u.p.pending_spaces = 0;
 
   switch (current_mode (dtp))
@@ -3674,7 +3673,7 @@ next_record_w (st_parameter_dt *dtp, int done)
     case UNFORMATTED_DIRECT:
       if (dtp->u.p.current_unit->bytes_left > 0)
 	{
-	  length = (int) dtp->u.p.current_unit->bytes_left;
+	  gfc_offset length = dtp->u.p.current_unit->bytes_left;
 	  if (sset (dtp->u.p.current_unit->s, 0, length) != length)
 	    goto io_error;
 	}
@@ -3691,11 +3690,14 @@ next_record_w (st_parameter_dt *dtp, int done)
       if (is_internal_unit (dtp))
 	{
 	  char *p;
+	  /* Internal unit, so must fit in memory.  */
+	  ptrdiff_t length, m, record;
+	  ptrdiff_t max_pos = max_pos_off;
 	  if (is_array_io (dtp))
 	    {
 	      int finished;
 
-	      length = (int) dtp->u.p.current_unit->bytes_left;
+	      length = dtp->u.p.current_unit->bytes_left;
 
 	      /* If the farthest position reached is greater than current
 	      position, adjust the position and set length to pad out
@@ -3705,14 +3707,14 @@ next_record_w (st_parameter_dt *dtp, int done)
 			- dtp->u.p.current_unit->bytes_left;
 	      if (max_pos > m)
 		{
-		  length = (int) (max_pos - m);
+		  length = (max_pos - m);
 		  if (sseek (dtp->u.p.current_unit->s,
 			     length, SEEK_CUR) < 0)
 		    {
 		      generate_error (&dtp->common, LIBERROR_INTERNAL_UNIT, NULL);
 		      return;
 		    }
-		  length = (int) (dtp->u.p.current_unit->recl - max_pos);
+		  length = ((ptrdiff_t) dtp->u.p.current_unit->recl - max_pos);
 		}
 
 	      p = write_block (dtp, length);
@@ -3735,7 +3737,7 @@ next_record_w (st_parameter_dt *dtp, int done)
 		dtp->u.p.current_unit->endfile = AT_ENDFILE;
 
 	      /* Now seek to this record */
-	      record = record * dtp->u.p.current_unit->recl;
+	      record = record * ((ptrdiff_t) dtp->u.p.current_unit->recl);
 
 	      if (sseek (dtp->u.p.current_unit->s, record, SEEK_SET) < 0)
 		{
@@ -3758,17 +3760,18 @@ next_record_w (st_parameter_dt *dtp, int done)
 			- dtp->u.p.current_unit->bytes_left;
 		  if (max_pos > m)
 		    {
-		      length = (int) (max_pos - m);
+		      length = max_pos - m;
 		      if (sseek (dtp->u.p.current_unit->s,
 				 length, SEEK_CUR) < 0)
 		        {
 			  generate_error (&dtp->common, LIBERROR_INTERNAL_UNIT, NULL);
 			  return;
 			}
-		      length = (int) (dtp->u.p.current_unit->recl - max_pos);
+		      length = (ptrdiff_t) dtp->u.p.current_unit->recl
+			- max_pos;
 		    }
 		  else
-		    length = (int) dtp->u.p.current_unit->bytes_left;
+		    length = dtp->u.p.current_unit->bytes_left;
 		}
 	      if (length > 0)
 		{
@@ -3887,6 +3890,7 @@ finalize_transfer (st_parameter_dt *dtp)
   if ((dtp->u.p.ionml != NULL)
       && (cf & IOPARM_DT_HAS_NAMELIST_NAME) != 0)
     {
+       dtp->u.p.namelist_mode = 1;
        if ((cf & IOPARM_DT_NAMELIST_READ_MODE) != 0)
 	 namelist_read (dtp);
        else
@@ -3981,6 +3985,19 @@ finalize_transfer (st_parameter_dt *dtp)
   next_record (dtp, 1);
 
  done:
+
+  if (dtp->u.p.unit_is_internal)
+    {
+      fbuf_destroy (dtp->u.p.current_unit);
+      if (dtp->u.p.current_unit
+	  && (dtp->u.p.current_unit->child_dtio  == 0)
+	  && dtp->u.p.current_unit->s)
+	{
+	  sclose (dtp->u.p.current_unit->s);
+	  dtp->u.p.current_unit->s = NULL;
+	}
+    }
+
 #ifdef HAVE_USELOCALE
   if (dtp->u.p.old_locale != (locale_t) 0)
     {
@@ -4084,18 +4101,19 @@ st_read_done (st_parameter_dt *dtp)
   if (dtp->u.p.current_unit != NULL
       && dtp->u.p.current_unit->child_dtio == 0)
     {
-      if (is_internal_unit (dtp) &&
-	  (dtp->common.flags & IOPARM_DT_HAS_UDTIO) == 0)
-        {
-	  free (dtp->u.p.current_unit->filename);
-	  dtp->u.p.current_unit->filename = NULL;
-	  free (dtp->u.p.current_unit->s);
-	  dtp->u.p.current_unit->s = NULL;
-	  if (dtp->u.p.current_unit->ls)
-	    free (dtp->u.p.current_unit->ls);
-	  dtp->u.p.current_unit->ls = NULL;
+      if (dtp->u.p.unit_is_internal)
+	{
+	  if ((dtp->common.flags & IOPARM_DT_HAS_UDTIO) == 0)
+	    {
+	      free (dtp->u.p.current_unit->filename);
+	      dtp->u.p.current_unit->filename = NULL;
+	      if (dtp->u.p.current_unit->ls)
+		free (dtp->u.p.current_unit->ls);
+	      dtp->u.p.current_unit->ls = NULL;
+	    }
+	  newunit_free (dtp->common.unit);
 	}
-      if (is_internal_unit (dtp) || dtp->u.p.format_not_saved)
+      if (dtp->u.p.unit_is_internal || dtp->u.p.format_not_saved)
 	{
 	  free_format_data (dtp->u.p.fmt);
 	  free_format (dtp);
@@ -4152,18 +4170,19 @@ st_write_done (st_parameter_dt *dtp)
 
       /* If this is a parent WRITE statement we do not need to retain the
 	 internal unit structure for child use.  */
-      if (is_internal_unit (dtp) &&
-	  (dtp->common.flags & IOPARM_DT_HAS_UDTIO) == 0)
+      if (dtp->u.p.unit_is_internal)
 	{
-	  free (dtp->u.p.current_unit->filename);
-	  dtp->u.p.current_unit->filename = NULL;
-	  free (dtp->u.p.current_unit->s);
-	  dtp->u.p.current_unit->s = NULL;
-	  if (dtp->u.p.current_unit->ls)
-	    free (dtp->u.p.current_unit->ls);
-	  dtp->u.p.current_unit->ls = NULL;
+	  if ((dtp->common.flags & IOPARM_DT_HAS_UDTIO) == 0)
+	    {
+	      free (dtp->u.p.current_unit->filename);
+	      dtp->u.p.current_unit->filename = NULL;
+	      if (dtp->u.p.current_unit->ls)
+		free (dtp->u.p.current_unit->ls);
+	      dtp->u.p.current_unit->ls = NULL;
+	    }
+	  newunit_free (dtp->common.unit);
 	}
-      if (is_internal_unit (dtp) || dtp->u.p.format_not_saved)
+      if (dtp->u.p.unit_is_internal || dtp->u.p.format_not_saved)
 	{
 	  free_format_data (dtp->u.p.fmt);
 	  free_format (dtp);

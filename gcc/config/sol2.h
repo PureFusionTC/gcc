@@ -205,8 +205,8 @@ along with GCC; see the file COPYING3.  If not see
 /* We don't use the standard svr4 STARTFILE_SPEC because it's wrong for us.  */
 #undef STARTFILE_SPEC
 #ifdef HAVE_SOLARIS_CRTS
-/* Since Solaris 11.x and Solaris 12, the OS delivers crt1.o, crti.o, and
-   crtn.o, with a hook for compiler-dependent stuff like profile handling.  */
+/* Since Solaris 11.4, the OS delivers crt1.o, crti.o, and crtn.o, with a hook
+   for compiler-dependent stuff like profile handling.  */
 #define STARTFILE_SPEC "%{!shared:%{!symbolic: \
 			  crt1.o%s \
 			  %{p:%e-p is not supported; \
@@ -410,8 +410,8 @@ along with GCC; see the file COPYING3.  If not see
 /* #pragma init and #pragma fini are implemented on top of init and
    fini attributes.  */
 #define SOLARIS_ATTRIBUTE_TABLE						\
-  { "init",      0, 0, true,  false,  false, NULL, false },		\
-  { "fini",      0, 0, true,  false,  false, NULL, false }
+  { "init",      0, 0, true,  false,  false, NULL, false, NULL },	\
+  { "fini",      0, 0, true,  false,  false, NULL, false, NULL }
 
 /* Solaris-specific #pragmas are implemented on top of attributes.  Hook in
    the bits from config/sol2.c.  */

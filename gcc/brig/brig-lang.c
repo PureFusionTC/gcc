@@ -278,10 +278,11 @@ brig_langhook_type_for_mode (machine_mode mode, int unsignedp)
       return NULL_TREE;
     }
 
-  enum mode_class mc = GET_MODE_CLASS (mode);
-  if (mc == MODE_FLOAT)
+  scalar_int_mode imode;
+  scalar_float_mode fmode;
+  if (is_float_mode (mode, &fmode))
     {
-      switch (GET_MODE_BITSIZE (mode))
+      switch (GET_MODE_BITSIZE (fmode))
 	{
 	case 32:
 	  return float_type_node;
@@ -290,15 +291,15 @@ brig_langhook_type_for_mode (machine_mode mode, int unsignedp)
 	default:
 	  /* We have to check for long double in order to support
 	     i386 excess precision.  */
-	  if (mode == TYPE_MODE (long_double_type_node))
+	  if (fmode == TYPE_MODE (long_double_type_node))
 	    return long_double_type_node;
 
 	  gcc_unreachable ();
 	  return NULL_TREE;
 	}
     }
-  else if (mc == MODE_INT)
-    return brig_langhook_type_for_size(GET_MODE_BITSIZE(mode), unsignedp);
+  else if (is_int_mode (mode, &imode))
+    return brig_langhook_type_for_size (GET_MODE_BITSIZE (imode), unsignedp);
   else
     {
       /* E.g., build_common_builtin_nodes () asks for modes/builtins
@@ -447,18 +448,18 @@ brig_localize_identifier (const char *ident)
 const struct attribute_spec brig_attribute_table[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       do_diagnostic } */
+       affects_type_identity, exclusions } */
   { "leaf",		      0, 0, true,  false, false,
-			      handle_leaf_attribute, false },
+			      handle_leaf_attribute, false, NULL },
   { "const",                  0, 0, true,  false, false,
-			      handle_const_attribute, false },
+			      handle_const_attribute, false, NULL },
   { "pure",                   0, 0, true,  false, false,
-			      handle_pure_attribute, false },
+			      handle_pure_attribute, false, NULL },
   { "nothrow",                0, 0, true,  false, false,
-			      handle_nothrow_attribute, false },
+			      handle_nothrow_attribute, false, NULL },
   { "returns_twice",          0, 0, true,  false, false,
-			      handle_returns_twice_attribute, false },
-  { NULL,                     0, 0, false, false, false, NULL, false }
+			      handle_returns_twice_attribute, false, NULL },
+  { NULL,                     0, 0, false, false, false, NULL, false, NULL }
 };
 
 /* Attribute handlers.  */

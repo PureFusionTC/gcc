@@ -258,6 +258,16 @@ rtx_writer::print_rtx_operand_code_0 (const_rtx in_rtx ATTRIBUTE_UNUSED,
 	  fputc ('\t', m_outfile);
 	  break;
 
+	case NOTE_INSN_BEGIN_STMT:
+#ifndef GENERATOR_FILE
+	  {
+	    expanded_location xloc
+	      = expand_location (NOTE_MARKER_LOCATION (in_rtx));
+	    fprintf (m_outfile, " %s:%i", xloc.file, xloc.line);
+	  }
+#endif
+	  break;
+
 	default:
 	  break;
 	}
@@ -966,6 +976,23 @@ debug (const rtx_def *ptr)
   else
     fprintf (stderr, "<nil>\n");
 }
+
+/* Like debug_rtx but with no newline, as debug_helper will add one.
+
+   Note: No debug_slim(rtx_insn *) variant implemented, as this
+   function can serve for both rtx and rtx_insn.  */
+
+static void
+debug_slim (const_rtx x)
+{
+  rtx_writer w (stderr, 0, false, false, NULL);
+  w.print_rtx (x);
+}
+
+DEFINE_DEBUG_VEC (rtx_def *)
+DEFINE_DEBUG_VEC (rtx_insn *)
+DEFINE_DEBUG_HASH_SET (rtx_def *)
+DEFINE_DEBUG_HASH_SET (rtx_insn *)
 
 /* Count of rtx's to print with debug_rtx_list.
    This global exists because gdb user defined commands have no arguments.  */
@@ -1791,12 +1818,26 @@ print_insn (pretty_printer *pp, const rtx_insn *x, int verbose)
 
     case DEBUG_INSN:
       {
+	if (DEBUG_MARKER_INSN_P (x))
+	  {
+	    switch (INSN_DEBUG_MARKER_KIND (x))
+	      {
+	      case NOTE_INSN_BEGIN_STMT:
+		pp_string (pp, "debug begin stmt marker");
+		break;
+
+	      default:
+		gcc_unreachable ();
+	      }
+	    break;
+	  }
+
 	const char *name = "?";
+	char idbuf[32];
 
 	if (DECL_P (INSN_VAR_LOCATION_DECL (x)))
 	  {
 	    tree id = DECL_NAME (INSN_VAR_LOCATION_DECL (x));
-	    char idbuf[32];
 	    if (id)
 	      name = IDENTIFIER_POINTER (id);
 	    else if (TREE_CODE (INSN_VAR_LOCATION_DECL (x))

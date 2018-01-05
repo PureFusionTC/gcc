@@ -296,8 +296,8 @@ warn_uninitialized_vars (bool warn_possibly_uninitialized)
 	         variable.  */
 	      if (DECL_P (base)
 		  && ref.size != -1
-		  && ref.max_size == ref.size
-		  && (ref.offset + ref.size <= 0
+		  && ((ref.max_size == ref.size
+		       && ref.offset + ref.size <= 0)
 		      || (ref.offset >= 0
 			  && DECL_SIZE (base)
 			  && TREE_CODE (DECL_SIZE (base)) == INTEGER_CST
@@ -1474,8 +1474,8 @@ is_pred_expr_subset_of (pred_info expr1, pred_info expr2)
     code2 = invert_tree_comparison (code2, false);
 
   if ((code1 == EQ_EXPR || code1 == BIT_AND_EXPR) && code2 == BIT_AND_EXPR)
-    return wi::eq_p (expr1.pred_rhs,
-		     wi::bit_and (expr1.pred_rhs, expr2.pred_rhs));
+    return (wi::to_wide (expr1.pred_rhs)
+	    == (wi::to_wide (expr1.pred_rhs) & wi::to_wide (expr2.pred_rhs)));
 
   if (code1 != code2 && code2 != NE_EXPR)
     return false;

@@ -147,6 +147,7 @@ static int write_srccorrs (int);
 
 static void vmsdbgout_init (const char *);
 static void vmsdbgout_finish (const char *);
+static void vmsdbgout_early_finish (const char *);
 static void vmsdbgout_assembly_start (void);
 static void vmsdbgout_define (unsigned int, const char *);
 static void vmsdbgout_undef (unsigned int, const char *);
@@ -176,7 +177,7 @@ static void vmsdbgout_abstract_function (tree);
 const struct gcc_debug_hooks vmsdbg_debug_hooks
 = {vmsdbgout_init,
    vmsdbgout_finish,
-   debug_nothing_charstar,
+   vmsdbgout_early_finish,
    vmsdbgout_assembly_start,
    vmsdbgout_define,
    vmsdbgout_undef,
@@ -205,6 +206,7 @@ const struct gcc_debug_hooks vmsdbg_debug_hooks
    debug_nothing_rtx_code_label,  /* label */
    debug_nothing_int,		  /* handle_pch */
    debug_nothing_rtx_insn,	  /* var_location */
+   debug_nothing_tree,	          /* inline_entry */
    debug_nothing_tree,		  /* size_function */
    debug_nothing_void,            /* switch_text_section */
    debug_nothing_tree_tree,	  /* set_name */
@@ -1554,6 +1556,13 @@ vmsdbgout_abstract_function (tree decl)
 {
   if (write_symbols == VMS_AND_DWARF2_DEBUG)
     (*dwarf2_debug_hooks.outlining_inline_function) (decl);
+}
+
+static void
+vmsdbgout_early_finish (const char *filename)
+{
+  if (write_symbols == VMS_AND_DWARF2_DEBUG)
+    (*dwarf2_debug_hooks.early_finish) (filename);
 }
 
 /* Output stuff that Debug requires at the end of every file and generate the

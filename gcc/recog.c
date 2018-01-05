@@ -408,6 +408,7 @@ verify_changes (int num)
 	       && REG_P (changes[i].old)
 	       && asm_noperands (PATTERN (object)) > 0
 	       && REG_EXPR (changes[i].old) != NULL_TREE
+	       && HAS_DECL_ASSEMBLER_NAME_P (REG_EXPR (changes[i].old))
 	       && DECL_ASSEMBLER_NAME_SET_P (REG_EXPR (changes[i].old))
 	       && DECL_REGISTER (REG_EXPR (changes[i].old)))
 	{
@@ -2251,6 +2252,7 @@ extract_insn (rtx_insn *insn)
     case ADDR_VEC:
     case ADDR_DIFF_VEC:
     case VAR_LOCATION:
+    case DEBUG_MARKER:
       return;
 
     case SET:
@@ -3380,6 +3382,7 @@ peep2_attempt (basic_block bb, rtx_insn *insn, int match_len, rtx_insn *attempt)
 	  case REG_NORETURN:
 	  case REG_SETJMP:
 	  case REG_TM:
+	  case REG_CALL_NOCF_CHECK:
 	    add_reg_note (new_insn, REG_NOTE_KIND (note),
 			  XEXP (note, 0));
 	    break;
@@ -3655,6 +3658,39 @@ peephole2_optimize (void)
 
 /* Common predicates for use with define_bypass.  */
 
+/* Helper function for store_data_bypass_p, handle just a single SET
+   IN_SET.  */
+
+static bool
+store_data_bypass_p_1 (rtx_insn *out_insn, rtx in_set)
+{
+  if (!MEM_P (SET_DEST (in_set)))
+    return false;
+
+  rtx out_set = single_set (out_insn);
+  if (out_set)
+    return !reg_mentioned_p (SET_DEST (out_set), SET_DEST (in_set));
+
+  rtx out_pat = PATTERN (out_insn);
+  if (GET_CODE (out_pat) != PARALLEL)
+    return false;
+
+  for (int i = 0; i < XVECLEN (out_pat, 0); i++)
+    {
+      rtx out_exp = XVECEXP (out_pat, 0, i);
+
+      if (GET_CODE (out_exp) == CLOBBER || GET_CODE (out_exp) == USE)
+	continue;
+
+      gcc_assert (GET_CODE (out_exp) == SET);
+
+      if (reg_mentioned_p (SET_DEST (out_exp), SET_DEST (in_set)))
+	return false;
+    }
+
+  return true;
+}
+
 /* True if the dependency between OUT_INSN and IN_INSN is on the store
    data not the address operand(s) of the store.  IN_INSN and OUT_INSN
    must be either a single_set or a PARALLEL with SETs inside.  */
@@ -3662,86 +3698,25 @@ peephole2_optimize (void)
 int
 store_data_bypass_p (rtx_insn *out_insn, rtx_insn *in_insn)
 {
-  rtx out_set, in_set;
-  rtx out_pat, in_pat;
-  rtx out_exp, in_exp;
-  int i, j;
-
-  in_set = single_set (in_insn);
+  rtx in_set = single_set (in_insn);
   if (in_set)
+    return store_data_bypass_p_1 (out_insn, in_set);
+
+  rtx in_pat = PATTERN (in_insn);
+  if (GET_CODE (in_pat) != PARALLEL)
+    return false;
+
+  for (int i = 0; i < XVECLEN (in_pat, 0); i++)
     {
-      if (!MEM_P (SET_DEST (in_set)))
+      rtx in_exp = XVECEXP (in_pat, 0, i);
+
+      if (GET_CODE (in_exp) == CLOBBER || GET_CODE (in_exp) == USE)
+	continue;
+
+      gcc_assert (GET_CODE (in_exp) == SET);
+
+      if (!store_data_bypass_p_1 (out_insn, in_exp))
 	return false;
-
-      out_set = single_set (out_insn);
-      if (out_set)
-        {
-          if (reg_mentioned_p (SET_DEST (out_set), SET_DEST (in_set)))
-            return false;
-        }
-      else
-        {
-          out_pat = PATTERN (out_insn);
-
-	  if (GET_CODE (out_pat) != PARALLEL)
-	    return false;
-
-          for (i = 0; i < XVECLEN (out_pat, 0); i++)
-          {
-            out_exp = XVECEXP (out_pat, 0, i);
-
-            if (GET_CODE (out_exp) == CLOBBER)
-              continue;
-
-            gcc_assert (GET_CODE (out_exp) == SET);
-
-            if (reg_mentioned_p (SET_DEST (out_exp), SET_DEST (in_set)))
-              return false;
-          }
-      }
-    }
-  else
-    {
-      in_pat = PATTERN (in_insn);
-      gcc_assert (GET_CODE (in_pat) == PARALLEL);
-
-      for (i = 0; i < XVECLEN (in_pat, 0); i++)
-	{
-	  in_exp = XVECEXP (in_pat, 0, i);
-
-	  if (GET_CODE (in_exp) == CLOBBER)
-	    continue;
-
-	  gcc_assert (GET_CODE (in_exp) == SET);
-
-	  if (!MEM_P (SET_DEST (in_exp)))
-	    return false;
-
-          out_set = single_set (out_insn);
-          if (out_set)
-            {
-              if (reg_mentioned_p (SET_DEST (out_set), SET_DEST (in_exp)))
-                return false;
-            }
-          else
-            {
-              out_pat = PATTERN (out_insn);
-              gcc_assert (GET_CODE (out_pat) == PARALLEL);
-
-              for (j = 0; j < XVECLEN (out_pat, 0); j++)
-                {
-                  out_exp = XVECEXP (out_pat, 0, j);
-
-                  if (GET_CODE (out_exp) == CLOBBER)
-                    continue;
-
-                  gcc_assert (GET_CODE (out_exp) == SET);
-
-                  if (reg_mentioned_p (SET_DEST (out_exp), SET_DEST (in_exp)))
-                    return false;
-                }
-            }
-        }
     }
 
   return true;
@@ -3861,7 +3836,7 @@ const pass_data pass_data_split_all_insns =
   OPTGROUP_NONE, /* optinfo_flags */
   TV_NONE, /* tv_id */
   0, /* properties_required */
-  0, /* properties_provided */
+  PROP_rtl_split_insns, /* properties_provided */
   0, /* properties_destroyed */
   0, /* todo_flags_start */
   0, /* todo_flags_finish */

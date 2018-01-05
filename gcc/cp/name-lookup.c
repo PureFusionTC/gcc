@@ -19,6 +19,7 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #include "config.h"
+#define INCLUDE_UNIQUE_PTR
 #include "system.h"
 #include "coretypes.h"
 #include "cp-tree.h"
@@ -32,6 +33,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "gcc-rich-location.h"
 #include "spellcheck-tree.h"
 #include "parser.h"
+#include "c-family/name-hint.h"
+#include "c-family/known-headers.h"
+#include "c-family/c-spellcheck.h"
 
 static cxx_binding *cxx_binding_make (tree value, tree type);
 static cp_binding_level *innermost_nonclass_level (void);
@@ -86,17 +90,9 @@ create_local_binding (cp_binding_level *level, tree name)
 static tree *
 find_namespace_slot (tree ns, tree name, bool create_p = false)
 {
-  tree *slot;
-
-  if (create_p)
-    {
-      bool existed;
-      slot = &DECL_NAMESPACE_BINDINGS (ns)->get_or_insert (name, &existed);
-      if (!existed)
-	*slot = NULL_TREE;
-    }
-  else
-    slot = DECL_NAMESPACE_BINDINGS (ns)->get (name);
+  tree *slot = DECL_NAMESPACE_BINDINGS (ns)
+    ->find_slot_with_hash (name, name ? IDENTIFIER_HASH_VALUE (name) : 0,
+			   create_p ? INSERT : NO_INSERT);
   return slot;
 }
 
@@ -1169,21 +1165,8 @@ fields_linear_search (tree klass, tree name, bool want_type)
 	  && TREE_CODE (decl) == FIELD_DECL
 	  && ANON_AGGR_TYPE_P (TREE_TYPE (decl)))
 	{
-	  tree anon = TREE_TYPE (decl);
-	  gcc_assert (COMPLETE_TYPE_P (anon));
-	  tree temp;
-	  
-	  if (vec<tree, va_gc> *member_vec = CLASSTYPE_MEMBER_VEC (anon))
-	    temp = member_vec_linear_search (member_vec, name);
-	  else
-	    temp = fields_linear_search (anon, name, want_type);
-
-	  if (temp)
-	    {
-	      /* Anon members can only contain fields.  */
-	      gcc_assert (!STAT_HACK_P (temp) && !DECL_DECLARES_TYPE_P (temp));
-	      return temp;
-	    }
+	  if (tree temp = search_anon_aggr (TREE_TYPE (decl), name))
+	    return temp;
 	}
 
       if (DECL_NAME (decl) != name)
@@ -1204,6 +1187,28 @@ fields_linear_search (tree klass, tree name, bool want_type)
 	return decl;
     }
 
+  return NULL_TREE;
+}
+
+/* Look for NAME field inside of anonymous aggregate ANON.  */
+
+tree
+search_anon_aggr (tree anon, tree name)
+{
+  gcc_assert (COMPLETE_TYPE_P (anon));
+  tree ret;
+	  
+  if (vec<tree, va_gc> *member_vec = CLASSTYPE_MEMBER_VEC (anon))
+    ret = member_vec_linear_search (member_vec, name);
+  else
+    ret = fields_linear_search (anon, name, false);
+
+  if (ret)
+    {
+      /* Anon members can only contain fields.  */
+      gcc_assert (!STAT_HACK_P (ret) && !DECL_DECLARES_TYPE_P (ret));
+      return ret;
+    }
   return NULL_TREE;
 }
 
@@ -1307,7 +1312,7 @@ get_class_binding (tree klass, tree name, int type_or_fns)
 	  if (CLASSTYPE_LAZY_DESTRUCTOR (klass))
 	    lazily_declare_fn (sfk_destructor, klass);
 	}
-      else if (name == cp_assignment_operator_id (NOP_EXPR))
+      else if (name == assign_op_identifier)
 	{
 	  if (CLASSTYPE_LAZY_COPY_ASSIGN (klass))
 	    lazily_declare_fn (sfk_copy_assignment, klass);
@@ -1465,7 +1470,10 @@ member_name_cmp (const void *a_p, const void *b_p)
      how we order these.  Use UID as a proxy for source ordering, so
      that identically-located decls still have a well-defined stable
      ordering.  */
-  return DECL_UID (a) < DECL_UID (b) ? -1 : +1;
+  if (DECL_UID (a) != DECL_UID (b))
+    return DECL_UID (a) < DECL_UID (b) ? -1 : +1;
+  gcc_assert (a == b);
+  return 0;
 }
 
 static struct {
@@ -2255,12 +2263,6 @@ supplement_binding_1 (cxx_binding *binding, tree decl)
       region to refer only to the namespace to which it already
       refers.  */
     ok = false;
-  else if (maybe_remove_implicit_alias (bval))
-    {
-      /* There was a mangling compatibility alias using this mangled name,
-	 but now we have a real decl that wants to use it instead.  */
-      binding->value = decl;
-    }
   else
     {
       if (!error_operand_p (bval))
@@ -2525,13 +2527,13 @@ update_binding (cp_binding_level *level, cxx_binding *binding, tree *slot,
   return decl;
 }
 
-/* Map of identifiers to extern C functions (or LISTS thereof).  */
+/* Table of identifiers to extern C declarations (or LISTS thereof).  */
 
-static GTY(()) hash_map<lang_identifier *, tree> *extern_c_fns;
+static GTY(()) hash_table<named_decl_hash> *extern_c_decls;
 
-/* DECL has C linkage. If we have an existing instance, make sure it
-   has the same exception specification [7.5, 7.6].  If there's no
-   instance, add DECL to the map.  */
+/* DECL has C linkage. If we have an existing instance, make sure the
+   new one is compatible.  Make sure it has the same exception
+   specification [7.5, 7.6].  Add DECL to the map.  */
 
 static void
 check_extern_c_conflict (tree decl)
@@ -2540,18 +2542,16 @@ check_extern_c_conflict (tree decl)
   if (DECL_ARTIFICIAL (decl) || DECL_IN_SYSTEM_HEADER (decl))
     return;
 
-  if (!extern_c_fns)
-    extern_c_fns = hash_map<lang_identifier *,tree>::create_ggc (127);
+  if (!extern_c_decls)
+    extern_c_decls = hash_table<named_decl_hash>::create_ggc (127);
 
-  bool existed;
-  tree *slot = &extern_c_fns->get_or_insert (DECL_NAME (decl), &existed);
-  if (!existed)
-    *slot = decl;
-  else
+  tree *slot = extern_c_decls
+    ->find_slot_with_hash (DECL_NAME (decl),
+			   IDENTIFIER_HASH_VALUE (DECL_NAME (decl)), INSERT);
+  if (tree old = *slot)
     {
-      tree old = *slot;
-      if (TREE_CODE (old) == TREE_LIST)
-	old = TREE_VALUE (old);
+      if (TREE_CODE (old) == OVERLOAD)
+	old = OVL_FUNCTION (old);
 
       int mismatch = 0;
       if (DECL_CONTEXT (old) == DECL_CONTEXT (decl))
@@ -2559,9 +2559,10 @@ check_extern_c_conflict (tree decl)
 	     about a (possible) mismatch, when inserting the decl.  */
       else if (!decls_match (decl, old))
 	mismatch = 1;
-      else if (!comp_except_specs (TYPE_RAISES_EXCEPTIONS (TREE_TYPE (old)),
-				   TYPE_RAISES_EXCEPTIONS (TREE_TYPE (decl)),
-				   ce_normal))
+      else if (TREE_CODE (decl) == FUNCTION_DECL
+	       && !comp_except_specs (TYPE_RAISES_EXCEPTIONS (TREE_TYPE (old)),
+				      TYPE_RAISES_EXCEPTIONS (TREE_TYPE (decl)),
+				      ce_normal))
 	mismatch = -1;
       else if (DECL_ASSEMBLER_NAME_SET_P (old))
 	SET_DECL_ASSEMBLER_NAME (decl, DECL_ASSEMBLER_NAME (old));
@@ -2569,17 +2570,32 @@ check_extern_c_conflict (tree decl)
       if (mismatch)
 	{
 	  pedwarn (input_location, 0,
-		   "declaration of %q#D with C language linkage", decl);
-	  pedwarn (DECL_SOURCE_LOCATION (old), 0,
-		   "conflicts with previous declaration %q#D", old);
+		   "conflicting C language linkage declaration %q#D", decl);
+	  inform (DECL_SOURCE_LOCATION (old),
+		  "previous declaration %q#D", old);
 	  if (mismatch < 0)
-	    pedwarn (input_location, 0,
-		     "due to different exception specifications");
+	    inform (input_location,
+		    "due to different exception specifications");
 	}
       else
-	/* Chain it on for c_linkage_binding's use.  */
-	*slot = tree_cons (NULL_TREE, decl, *slot);
+	{
+	  if (old == *slot)
+	    /* The hash table expects OVERLOADS, so construct one with
+	       OLD as both the function and the chain.  This allocate
+	       an excess OVERLOAD node, but it's rare to have multiple
+	       extern "C" decls of the same name.  And we save
+	       complicating the hash table logic (which is used
+	       elsewhere).  */
+	    *slot = ovl_make (old, old);
+
+	  slot = &OVL_CHAIN (*slot);
+
+	  /* Chain it on for c_linkage_binding's use.  */
+	  *slot = tree_cons (NULL_TREE, decl, *slot);
+	}
     }
+  else
+    *slot = decl;
 }
 
 /* Returns a list of C-linkage decls with the name NAME.  Used in
@@ -2588,9 +2604,16 @@ check_extern_c_conflict (tree decl)
 tree
 c_linkage_bindings (tree name)
 {
-  if (extern_c_fns)
-    if (tree *slot = extern_c_fns->get (name))
-      return *slot;
+  if (extern_c_decls)
+    if (tree *slot = extern_c_decls
+	->find_slot_with_hash (name, IDENTIFIER_HASH_VALUE (name), NO_INSERT))
+      {
+	tree result = *slot;
+	if (TREE_CODE (result) == OVERLOAD)
+	  result = OVL_CHAIN (result);
+	return result;
+      }
+
   return NULL_TREE;
 }
 
@@ -2722,7 +2745,11 @@ check_local_shadow (tree decl)
       else if (warn_shadow_local)
 	warning_code = OPT_Wshadow_local;
       else if (warn_shadow_compatible_local
-	       && can_convert (TREE_TYPE (old), TREE_TYPE (decl), tf_none))
+	       && (same_type_p (TREE_TYPE (old), TREE_TYPE (decl))
+		   || (!dependent_type_p (TREE_TYPE (decl))
+		       && !dependent_type_p (TREE_TYPE (old))
+		       && can_convert (TREE_TYPE (old), TREE_TYPE (decl),
+				       tf_none))))
 	warning_code = OPT_Wshadow_compatible_local;
       else
 	return;
@@ -2956,7 +2983,10 @@ do_pushdecl (tree decl, bool is_friend)
   while (level->kind == sk_class)
     level = level->level_chain;
 
-  if (tree name = DECL_NAME (decl))
+  /* An anonymous namespace has a NULL DECL_NAME, but we still want to
+     insert it.  Other NULL-named decls, not so much.  */
+  tree name = DECL_NAME (decl);
+  if (name || TREE_CODE (decl) == NAMESPACE_DECL)
     {
       cxx_binding *binding = NULL; /* Local scope binding.  */
       tree ns = NULL_TREE; /* Searched namespace.  */
@@ -3017,9 +3047,8 @@ do_pushdecl (tree decl, bool is_friend)
 		    else
 		      *slot = head;
 		  }
-		if (TREE_CODE (match) == FUNCTION_DECL
-		    && DECL_EXTERN_C_P (match))
-		  /* We need to check and register the fn now.  */
+		if (DECL_EXTERN_C_P (match))
+		  /* We need to check and register the decl now.  */
 		  check_extern_c_conflict (match);
 	      }
 	    return match;
@@ -3100,7 +3129,9 @@ do_pushdecl (tree decl, bool is_friend)
 	}
       else if (VAR_P (decl))
 	maybe_register_incomplete_var (decl);
-      else if (TREE_CODE (decl) == FUNCTION_DECL && DECL_EXTERN_C_P (decl))
+
+      if ((VAR_P (decl) || TREE_CODE (decl) == FUNCTION_DECL)
+	  && DECL_EXTERN_C_P (decl))
 	check_extern_c_conflict (decl);
     }
   else
@@ -3778,16 +3809,6 @@ identifier_type_value (tree id)
   ret = identifier_type_value_1 (id);
   timevar_stop (TV_NAME_LOOKUP);
   return ret;
-}
-
-
-/* Return the IDENTIFIER_GLOBAL_VALUE of T, for use in common code, since
-   the definition of IDENTIFIER_GLOBAL_VALUE is different for C and C++.  */
-
-tree
-identifier_global_value	(tree t)
-{
-  return IDENTIFIER_GLOBAL_VALUE (t);
 }
 
 /* Push a definition of struct, union or enum tag named ID.  into
@@ -4845,31 +4866,23 @@ get_namespace_binding (tree ns, tree name)
   return ret;
 }
 
-/* Set value binding of NAME in the global namespace to VAL.  Does not
-   add it to the list of things in the namespace.  */
+/* Push internal DECL into the global namespace.  Does not do the
+   full overload fn handling and does not add it to the list of things
+   in the namespace.  */
 
 void
-set_global_binding (tree name, tree val)
+set_global_binding (tree decl)
 {
   bool subtime = timevar_cond_start (TV_NAME_LOOKUP);
 
-  tree *slot = find_namespace_slot (global_namespace, name, true);
-  tree old = MAYBE_STAT_DECL (*slot);
+  tree *slot = find_namespace_slot (global_namespace, DECL_NAME (decl), true);
 
-  if (!old)
-    *slot = val;
-  else if (old == val)
-    ;
-  else if (!STAT_HACK_P (*slot)
-	   && TREE_CODE (val) == TYPE_DECL && DECL_ARTIFICIAL (val))
-    *slot = stat_hack (old, val);
-  else if (!STAT_HACK_P (*slot)
-	   && TREE_CODE (old) == TYPE_DECL && DECL_ARTIFICIAL (old))
-    *slot = stat_hack (val, old);
-  else
-    /* The user's placed something in the implementor's
-       namespace.  */
-    diagnose_name_conflict (val, old);
+  if (*slot)
+    /* The user's placed something in the implementor's namespace.  */
+    diagnose_name_conflict (decl, MAYBE_STAT_DECL (*slot));
+
+  /* Force the binding, so compiler internals continue to work.  */
+  *slot = decl;
 
   timevar_cond_stop (TV_NAME_LOOKUP, subtime);
 }
@@ -5374,13 +5387,14 @@ suggest_alternatives_for (location_t location, tree name,
     }
   else if (!suggest_misspellings)
     ;
-  else if (const char *fuzzy = lookup_name_fuzzy (name, FUZZY_LOOKUP_NAME))
+  else if (name_hint hint = lookup_name_fuzzy (name, FUZZY_LOOKUP_NAME,
+					       location))
     {
       /* Show a spelling correction.  */
       gcc_rich_location richloc (location);
 
-      richloc.add_fixit_replace (fuzzy);
-      inform_at_rich_loc (&richloc, "suggested alternative: %qs", fuzzy);
+      richloc.add_fixit_replace (hint.suggestion ());
+      inform (&richloc, "suggested alternative: %qs", hint.suggestion ());
     }
 }
 
@@ -5401,6 +5415,9 @@ get_std_name_hint (const char *name)
   static const std_name_hint hints[] = {
     /* <array>.  */
     {"array", "<array>"}, // C++11
+    /* <complex>.  */
+    {"complex", "<complex>"},
+    {"complex_literals", "<complex>"},
     /* <deque>.  */
     {"deque", "<deque>"},
     /* <forward_list>.  */
@@ -5488,10 +5505,10 @@ maybe_suggest_missing_header (location_t location, tree name, tree scope)
 
   gcc_rich_location richloc (location);
   maybe_add_include_fixit (&richloc, header_hint);
-  inform_at_rich_loc (&richloc,
-		      "%<std::%s%> is defined in header %qs;"
-		      " did you forget to %<#include %s%>?",
-		      name_str, header_hint, header_hint);
+  inform (&richloc,
+	  "%<std::%s%> is defined in header %qs;"
+	  " did you forget to %<#include %s%>?",
+	  name_str, header_hint, header_hint);
   return true;
 }
 
@@ -5521,8 +5538,8 @@ suggest_alternative_in_explicit_scope (location_t location, tree name,
     {
       gcc_rich_location richloc (location);
       richloc.add_fixit_replace (fuzzy_name);
-      inform_at_rich_loc (&richloc, "suggested alternative: %qs",
-			  fuzzy_name);
+      inform (&richloc, "suggested alternative: %qs",
+	      fuzzy_name);
       return true;
     }
 
@@ -5600,6 +5617,10 @@ consider_binding_level (tree name, best_match <tree, const char *> &bm,
 	  bm.consider (IDENTIFIER_POINTER (best_matching_field));
       }
 
+  /* Only suggest names reserved for the implementation if NAME begins
+     with an underscore.  */
+  bool consider_implementation_names = (IDENTIFIER_POINTER (name)[0] == '_');
+
   for (tree t = lvl->names; t; t = TREE_CHAIN (t))
     {
       tree d = t;
@@ -5620,21 +5641,81 @@ consider_binding_level (tree name, best_match <tree, const char *> &bm,
 	  && DECL_ANTICIPATED (d))
 	continue;
 
-      if (tree name = DECL_NAME (d))
-	/* Ignore internal names with spaces in them.  */
-	if (!strchr (IDENTIFIER_POINTER (name), ' '))
-	  bm.consider (IDENTIFIER_POINTER (name));
+      tree suggestion = DECL_NAME (d);
+      if (!suggestion)
+	continue;
+
+      const char *suggestion_str = IDENTIFIER_POINTER (suggestion);
+
+      /* Ignore internal names with spaces in them.  */
+      if (strchr (suggestion_str, ' '))
+	continue;
+
+      /* Don't suggest names that are reserved for use by the
+	 implementation, unless NAME began with an underscore.  */
+      if (name_reserved_for_implementation_p (suggestion_str)
+	  && !consider_implementation_names)
+	continue;
+
+      bm.consider (suggestion_str);
     }
 }
 
+/* Subclass of deferred_diagnostic.  Notify the user that the
+   given macro was used before it was defined.
+   This can be done in the C++ frontend since tokenization happens
+   upfront.  */
+
+class macro_use_before_def : public deferred_diagnostic
+{
+ public:
+  /* Ctor.  LOC is the location of the usage.  MACRO is the
+     macro that was used.  */
+  macro_use_before_def (location_t loc, cpp_hashnode *macro)
+  : deferred_diagnostic (loc), m_macro (macro)
+  {
+    gcc_assert (macro);
+  }
+
+  ~macro_use_before_def ()
+  {
+    if (is_suppressed_p ())
+      return;
+
+    source_location def_loc = cpp_macro_definition_location (m_macro);
+    if (def_loc != UNKNOWN_LOCATION)
+      {
+	inform (get_location (), "the macro %qs had not yet been defined",
+		(const char *)m_macro->ident.str);
+	inform (def_loc, "it was later defined here");
+      }
+  }
+
+ private:
+  cpp_hashnode *m_macro;
+};
+
+
 /* Search for near-matches for NAME within the current bindings, and within
    macro names, returning the best match as a const char *, or NULL if
-   no reasonable match is found.  */
+   no reasonable match is found.
 
-const char *
-lookup_name_fuzzy (tree name, enum lookup_name_fuzzy_kind kind)
+   Use LOC for any deferred diagnostics.  */
+
+name_hint
+lookup_name_fuzzy (tree name, enum lookup_name_fuzzy_kind kind, location_t loc)
 {
   gcc_assert (TREE_CODE (name) == IDENTIFIER_NODE);
+
+  /* First, try some well-known names in the C++ standard library, in case
+     the user forgot a #include.  */
+  const char *header_hint
+    = get_cp_stdlib_header_for_name (IDENTIFIER_POINTER (name));
+  if (header_hint)
+    return name_hint (NULL,
+		      new suggest_missing_header (loc,
+						  IDENTIFIER_POINTER (name),
+						  header_hint));
 
   best_match <tree, const char *> bm (name);
 
@@ -5662,6 +5743,15 @@ lookup_name_fuzzy (tree name, enum lookup_name_fuzzy_kind kind)
   /* If a macro is the closest so far to NAME, consider it.  */
   if (best_macro)
     bm.consider ((const char *)best_macro->ident.str);
+  else if (bmm.get_best_distance () == 0)
+    {
+      /* If we have an exact match for a macro name, then the
+	 macro has been used before it was defined.  */
+      cpp_hashnode *macro = bmm.blithely_get_best_candidate ();
+      if (macro)
+	return name_hint (NULL,
+			  new macro_use_before_def (loc, macro));
+    }
 
   /* Try the "starts_decl_specifier_p" keywords to detect
      "singed" vs "signed" typos.  */
@@ -5686,7 +5776,7 @@ lookup_name_fuzzy (tree name, enum lookup_name_fuzzy_kind kind)
       bm.consider (IDENTIFIER_POINTER (resword_identifier));
     }
 
-  return bm.get_best_meaningful_candidate ();
+  return name_hint (bm.get_best_meaningful_candidate (), NULL);
 }
 
 /* Subroutine of outer_binding.
@@ -6245,9 +6335,7 @@ do_pushtag (tree name, tree type, tag_scope scope)
 	    view of the language.  */
 	 || (b->kind == sk_template_parms
 	     && (b->explicit_spec_p || scope == ts_global))
-	 /* Pushing into a class is ok for lambdas or when we want current  */
 	 || (b->kind == sk_class
-	     && scope != ts_lambda
 	     && (scope != ts_current
 		 /* We may be defining a new type in the initializer
 		    of a static member variable. We allow this when
@@ -6270,7 +6358,6 @@ do_pushtag (tree name, tree type, tag_scope scope)
 	  tree cs = current_scope ();
 
 	  if (scope == ts_current
-	      || scope == ts_lambda
 	      || (cs && TREE_CODE (cs) == FUNCTION_DECL))
 	    context = cs;
 	  else if (cs && TYPE_P (cs))
@@ -6307,8 +6394,7 @@ do_pushtag (tree name, tree type, tag_scope scope)
 
       if (b->kind == sk_class)
 	{
-	  if (!TYPE_BEING_DEFINED (current_class_type)
-	      && scope != ts_lambda)
+	  if (!TYPE_BEING_DEFINED (current_class_type))
 	    return error_mark_node;
 
 	  if (!PROCESSING_REAL_TEMPLATE_DECL_P ())
@@ -6630,9 +6716,7 @@ do_push_nested_namespace (tree ns)
     {
       do_push_nested_namespace (CP_DECL_CONTEXT (ns));
       gcc_checking_assert
-	(find_namespace_value (current_namespace,
-			       DECL_NAME (ns) ? DECL_NAME (ns)
-			       : anon_identifier) == ns);
+	(find_namespace_value (current_namespace, DECL_NAME (ns)) == ns);
       resume_scope (NAMESPACE_LEVEL (ns));
       current_namespace = ns;
     }
@@ -6790,10 +6874,7 @@ push_namespace (tree name, bool make_inline)
   /* We should not get here if the global_namespace is not yet constructed
      nor if NAME designates the global namespace:  The global scope is
      constructed elsewhere.  */
-  gcc_assert (global_namespace != NULL && name != global_identifier);
-
-  if (!name)
-    name = anon_identifier;
+  gcc_checking_assert (global_namespace != NULL && name != global_identifier);
 
   tree ns = NULL_TREE;
   {
@@ -6839,11 +6920,9 @@ push_namespace (tree name, bool make_inline)
 	ns = NULL_TREE;
       else
 	{
-	  if (name == anon_identifier)
+	  if (!name)
 	    {
-	      /* Clear DECL_NAME for the benefit of debugging back ends.  */
-	      SET_DECL_ASSEMBLER_NAME (ns, name);
-	      DECL_NAME (ns) = NULL_TREE;
+	      SET_DECL_ASSEMBLER_NAME (ns, anon_identifier);
 
 	      if (!make_inline)
 		add_using_namespace (DECL_NAMESPACE_USING (current_namespace),
@@ -6858,7 +6937,7 @@ push_namespace (tree name, bool make_inline)
 	      vec_safe_push (DECL_NAMESPACE_INLINEES (current_namespace), ns);
 	    }
 
-	  if (name == anon_identifier || make_inline)
+	  if (!name || make_inline)
 	    emit_debug_info_using_namespace (current_namespace, ns, true);
 	}
     }

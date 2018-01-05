@@ -223,6 +223,7 @@ protected:
 						   current choices have
 						   been optimized.  */
 #define PROP_gimple_lomp_dev	(1 << 16)	/* done omp_device_lower */
+#define PROP_rtl_split_insns	(1 << 17)	/* RTL has insns split.  */
 
 #define PROP_trees \
   (PROP_gimple_any | PROP_gimple_lcf | PROP_gimple_leh | PROP_gimple_lomp)
@@ -367,8 +368,10 @@ extern gimple_opt_pass *make_pass_tree_loop (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_tree_no_loop (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_tree_loop_init (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_lim (gcc::context *ctxt);
+extern gimple_opt_pass *make_pass_linterchange (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_tree_unswitch (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_loop_split (gcc::context *ctxt);
+extern gimple_opt_pass *make_pass_loop_jam (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_predcom (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_iv_canon (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_scev_cprop (gcc::context *ctxt);

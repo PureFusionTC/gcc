@@ -967,8 +967,9 @@ ipa_polymorphic_call_context::ipa_polymorphic_call_context (tree fndecl,
       else if (TREE_CODE (base_pointer) == POINTER_PLUS_EXPR
 	       && TREE_CODE (TREE_OPERAND (base_pointer, 1)) == INTEGER_CST)
 	{
-	  offset_int o = offset_int::from (TREE_OPERAND (base_pointer, 1),
-					   SIGNED);
+	  offset_int o
+	    = offset_int::from (wi::to_wide (TREE_OPERAND (base_pointer, 1)),
+				SIGNED);
 	  o *= BITS_PER_UNIT;
 	  o += offset;
 	  if (!wi::fits_shwi_p (o))
@@ -1148,7 +1149,7 @@ noncall_stmt_may_be_vtbl_ptr_store (gimple *stmt)
 	  if (TREE_CODE (lhs) == COMPONENT_REF
 	      && !DECL_VIRTUAL_P (TREE_OPERAND (lhs, 1)))
 	    return false;
-	  /* In the future we might want to use get_base_ref_and_offset to find
+	  /* In the future we might want to use get_ref_base_and_extent to find
 	     if there is a field corresponding to the offset and if so, proceed
 	     almost like if it was a component ref.  */
 	}

@@ -97,6 +97,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-dfa.h"
 #include "tree-ssa.h"
 #include "symbol-summary.h"
+#include "ipa-param-manipulation.h"
 #include "ipa-prop.h"
 #include "params.h"
 #include "dbgcnt.h"
@@ -1140,6 +1141,33 @@ contains_view_convert_expr_p (const_tree ref)
   return false;
 }
 
+/* Return true if REF contains a VIEW_CONVERT_EXPR or a MEM_REF that performs
+   type conversion or a COMPONENT_REF with a bit-field field declaration.  */
+
+static bool
+contains_vce_or_bfcref_p (const_tree ref)
+{
+  while (handled_component_p (ref))
+    {
+      if (TREE_CODE (ref) == VIEW_CONVERT_EXPR
+	  || (TREE_CODE (ref) == COMPONENT_REF
+	      && DECL_BIT_FIELD (TREE_OPERAND (ref, 1))))
+	return true;
+      ref = TREE_OPERAND (ref, 0);
+    }
+
+  if (TREE_CODE (ref) != MEM_REF
+      || TREE_CODE (TREE_OPERAND (ref, 0)) != ADDR_EXPR)
+    return false;
+
+  tree mem = TREE_OPERAND (TREE_OPERAND (ref, 0), 0);
+  if (TYPE_MAIN_VARIANT (TREE_TYPE (ref))
+      != TYPE_MAIN_VARIANT (TREE_TYPE (mem)))
+    return true;
+
+  return false;
+}
+
 /* Search the given tree for a declaration by skipping handled components and
    exclude it from the candidates.  */
 
@@ -1338,7 +1366,14 @@ build_accesses_from_assign (gimple *stmt)
       racc->grp_assignment_read = 1;
       if (should_scalarize_away_bitmap && !gimple_has_volatile_ops (stmt)
 	  && !is_gimple_reg_type (racc->type))
-	bitmap_set_bit (should_scalarize_away_bitmap, DECL_UID (racc->base));
+	{
+	  if (contains_vce_or_bfcref_p (rhs))
+	    bitmap_set_bit (cannot_scalarize_away_bitmap,
+			    DECL_UID (racc->base));
+	  else
+	    bitmap_set_bit (should_scalarize_away_bitmap,
+			    DECL_UID (racc->base));
+	}
       if (storage_order_barrier_p (lhs))
 	racc->grp_unscalarizable_region = 1;
     }
@@ -2477,7 +2512,7 @@ analyze_access_subtree (struct access *root, struct access *parent,
 	  gcc_checking_assert (!root->grp_scalar_read
 			       && !root->grp_assignment_read);
 	  sth_created = true;
-	  if (MAY_HAVE_DEBUG_STMTS)
+	  if (MAY_HAVE_DEBUG_BIND_STMTS)
 	    {
 	      root->grp_to_be_debug_replaced = 1;
 	      root->replacement_decl = create_access_replacement (root);
@@ -2691,7 +2726,7 @@ propagate_subaccesses_across_link (struct access *lacc, struct access *racc)
 	    }
 	  else
 	    {
-	      if (rchild->grp_write && !lacc->grp_write)
+	      if (!lacc->grp_write)
 		{
 		  ret = true;
 		  subtree_mark_written_and_enqueue (lacc);
@@ -3413,24 +3448,6 @@ get_repl_default_def_ssa_name (struct access *racc)
   if (!racc->replacement_decl)
     racc->replacement_decl = create_access_replacement (racc);
   return get_or_create_ssa_default_def (cfun, racc->replacement_decl);
-}
-
-/* Return true if REF has an VIEW_CONVERT_EXPR or a COMPONENT_REF with a
-   bit-field field declaration somewhere in it.  */
-
-static inline bool
-contains_vce_or_bfcref_p (const_tree ref)
-{
-  while (handled_component_p (ref))
-    {
-      if (TREE_CODE (ref) == VIEW_CONVERT_EXPR
-	  || (TREE_CODE (ref) == COMPONENT_REF
-	      && DECL_BIT_FIELD (TREE_OPERAND (ref, 1))))
-	return true;
-      ref = TREE_OPERAND (ref, 0);
-    }
-
-  return false;
 }
 
 /* Examine both sides of the assignment statement pointed to by STMT, replace
@@ -4452,7 +4469,7 @@ static struct access *
 splice_param_accesses (tree parm, bool *ro_grp)
 {
   int i, j, access_count, group_count;
-  int agg_size, total_size = 0;
+  int total_size = 0;
   struct access *access, *res, **prev_acc_ptr = &res;
   vec<access_p> *access_vec;
 
@@ -4519,13 +4536,6 @@ splice_param_accesses (tree parm, bool *ro_grp)
       i = j;
     }
 
-  if (POINTER_TYPE_P (TREE_TYPE (parm)))
-    agg_size = tree_to_uhwi (TYPE_SIZE (TREE_TYPE (TREE_TYPE (parm))));
-  else
-    agg_size = tree_to_uhwi (TYPE_SIZE (TREE_TYPE (parm)));
-  if (total_size >= agg_size)
-    return NULL;
-
   gcc_assert (group_count > 0);
   return res;
 }
@@ -4536,7 +4546,7 @@ splice_param_accesses (tree parm, bool *ro_grp)
 static int
 decide_one_param_reduction (struct access *repr)
 {
-  int total_size, cur_parm_size, agg_size, new_param_count, parm_size_limit;
+  HOST_WIDE_INT total_size, cur_parm_size;
   bool by_ref;
   tree parm;
 
@@ -4545,15 +4555,9 @@ decide_one_param_reduction (struct access *repr)
   gcc_assert (cur_parm_size > 0);
 
   if (POINTER_TYPE_P (TREE_TYPE (parm)))
-    {
-      by_ref = true;
-      agg_size = tree_to_uhwi (TYPE_SIZE (TREE_TYPE (TREE_TYPE (parm))));
-    }
+    by_ref = true;
   else
-    {
-      by_ref = false;
-      agg_size = cur_parm_size;
-    }
+    by_ref = false;
 
   if (dump_file)
     {
@@ -4566,7 +4570,7 @@ decide_one_param_reduction (struct access *repr)
     }
 
   total_size = 0;
-  new_param_count = 0;
+  int new_param_count = 0;
 
   for (; repr; repr = repr->next_grp)
     {
@@ -4594,22 +4598,28 @@ decide_one_param_reduction (struct access *repr)
 
   gcc_assert (new_param_count > 0);
 
-  if (optimize_function_for_size_p (cfun))
-    parm_size_limit = cur_parm_size;
-  else
-    parm_size_limit = (PARAM_VALUE (PARAM_IPA_SRA_PTR_GROWTH_FACTOR)
-                       * cur_parm_size);
-
-  if (total_size < agg_size
-      && total_size <= parm_size_limit)
+  if (!by_ref)
     {
-      if (dump_file)
-	fprintf (dump_file, "    ....will be split into %i components\n",
-		 new_param_count);
-      return new_param_count;
+      if (total_size >= cur_parm_size)
+	return 0;
     }
   else
-    return 0;
+    {
+      int parm_num_limit;
+      if (optimize_function_for_size_p (cfun))
+	parm_num_limit = 1;
+      else
+	parm_num_limit = PARAM_VALUE (PARAM_IPA_SRA_PTR_GROWTH_FACTOR);
+
+      if (new_param_count > parm_num_limit
+	  || total_size > (parm_num_limit * cur_parm_size))
+	return 0;
+    }
+
+  if (dump_file)
+    fprintf (dump_file, "    ....will be split into %i components\n",
+	     new_param_count);
+  return new_param_count;
 }
 
 /* The order of the following enums is important, we need to do extra work for

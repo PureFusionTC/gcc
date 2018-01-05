@@ -40,6 +40,10 @@ HOST_WIDE_INT x_rs6000_isa_flags_explicit
 TargetVariable
 enum processor_type rs6000_cpu = PROCESSOR_PPC603
 
+;; Current tuning
+TargetVariable
+enum processor_type rs6000_tune = PROCESSOR_PPC603
+
 ;; Always emit branch hint bits.
 TargetVariable
 unsigned char rs6000_always_hint
@@ -381,10 +385,10 @@ mabi=d32
 Target RejectNegative Undocumented Warn(using old darwin ABI) Var(rs6000_darwin64_abi, 0)
 
 mabi=ieeelongdouble
-Target RejectNegative Undocumented Warn(using IEEE extended precision long double) Var(rs6000_ieeequad) Save
+Target RejectNegative Var(rs6000_ieeequad) Save
 
 mabi=ibmlongdouble
-Target RejectNegative Undocumented Warn(using IBM extended precision long double) Var(rs6000_ieeequad, 0)
+Target RejectNegative Var(rs6000_ieeequad, 0)
 
 mcpu=
 Target RejectNegative Joined Var(rs6000_cpu_index) Init(-1) Enum(rs6000_cpu_opt_value) Save

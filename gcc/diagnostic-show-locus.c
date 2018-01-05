@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "diagnostic-color.h"
 #include "gcc-rich-location.h"
 #include "selftest.h"
+#include "selftest-diagnostic.h"
 
 #ifdef HAVE_TERMIOS_H
 # include <termios.h>
@@ -1690,7 +1691,7 @@ layout::print_trailing_fixits (int row)
   /* Now print the corrections.  */
   unsigned i;
   correction *c;
-  int column = 0;
+  int column = m_x_offset;
 
   FOR_EACH_VEC_ELT (corrections.m_corrections, i, c)
     {
@@ -1844,7 +1845,7 @@ layout::move_to_column (int *column, int dest_column)
   if (*column > dest_column)
     {
       print_newline ();
-      *column = 0;
+      *column = m_x_offset;
     }
 
   while (*column < dest_column)
@@ -1986,34 +1987,6 @@ diagnostic_show_locus (diagnostic_context * context,
 namespace selftest {
 
 /* Selftests for diagnostic_show_locus.  */
-
-/* Convenience subclass of diagnostic_context for testing
-   diagnostic_show_locus.  */
-
-class test_diagnostic_context : public diagnostic_context
-{
- public:
-  test_diagnostic_context ()
-  {
-    diagnostic_initialize (this, 0);
-    show_caret = true;
-    show_column = true;
-    start_span = start_span_cb;
-  }
-  ~test_diagnostic_context ()
-  {
-    diagnostic_finish (this);
-  }
-
-  /* Implementation of diagnostic_start_span_fn, hiding the
-     real filename (to avoid printing the names of tempfiles).  */
-  static void
-  start_span_cb (diagnostic_context *context, expanded_location exploc)
-  {
-    exploc.file = "FILENAME";
-    default_diagnostic_start_span_fn (context, exploc);
-  }
-};
 
 /* Verify that diagnostic_show_locus works sanely on UNKNOWN_LOCATION.  */
 

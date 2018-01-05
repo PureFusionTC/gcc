@@ -102,6 +102,41 @@ static GTY(()) vec<tree, va_gc> *no_linkage_decls;
    is to be an alias for the former if the former is defined.  */
 static GTY(()) vec<tree, va_gc> *mangling_aliases;
 
+/* hash traits for declarations.  Hashes single decls via
+   DECL_ASSEMBLER_NAME_RAW.  */
+
+struct mangled_decl_hash : ggc_remove <tree>
+{
+  typedef tree value_type; /* A DECL.  */
+  typedef tree compare_type; /* An identifier.  */
+
+  static hashval_t hash (const value_type decl)
+  {
+    return IDENTIFIER_HASH_VALUE (DECL_ASSEMBLER_NAME_RAW (decl));
+  }
+  static bool equal (const value_type existing, compare_type candidate)
+  {
+    tree name = DECL_ASSEMBLER_NAME_RAW (existing);
+    return candidate == name;
+  }
+
+  static inline void mark_empty (value_type &p) {p = NULL_TREE;}
+  static inline bool is_empty (value_type p) {return !p;}
+
+  static bool is_deleted (value_type e)
+  {
+    return e == reinterpret_cast <value_type> (1);
+  }
+  static void mark_deleted (value_type &e)
+  {
+    e = reinterpret_cast <value_type> (1);
+  }
+};
+
+/* A hash table of decls keyed by mangled name.  Used to figure out if
+   we need compatibility aliases.  */
+static GTY(()) hash_table<mangled_decl_hash> *mangled_decls;
+
 /* Nonzero if we're done parsing and into end-of-file activities.  */
 
 int at_eof;
@@ -757,6 +792,15 @@ finish_static_data_member_decl (tree decl,
       && TYPE_DOMAIN (TREE_TYPE (decl)) == NULL_TREE)
     SET_VAR_HAD_UNKNOWN_BOUND (decl);
 
+  if (init)
+    {
+      /* Similarly to start_decl_1, we want to complete the type in order
+	 to do the right thing in cp_apply_type_quals_to_decl, possibly
+	 clear TYPE_QUAL_CONST (c++/65579).  */
+      tree type = TREE_TYPE (decl) = complete_type (TREE_TYPE (decl));
+      cp_apply_type_quals_to_decl (cp_type_quals (type), decl);
+    }
+
   cp_finish_decl (decl, init, init_const_expr_p, asmspec_tree, flags);
 }
 
@@ -867,9 +911,18 @@ grokfield (const cp_declarator *declarator,
 	{
 	  if (init == ridpointers[(int)RID_DELETE])
 	    {
-	      DECL_DELETED_FN (value) = 1;
-	      DECL_DECLARED_INLINE_P (value) = 1;
-	      DECL_INITIAL (value) = error_mark_node;
+	      if (friendp && decl_defined_p (value))
+		{
+		  error ("redefinition of %q#D", value);
+		  inform (DECL_SOURCE_LOCATION (value),
+			  "%q#D previously defined here", value);
+		}
+	      else
+		{
+		  DECL_DELETED_FN (value) = 1;
+		  DECL_DECLARED_INLINE_P (value) = 1;
+		  DECL_INITIAL (value) = error_mark_node;
+		}
 	    }
 	  else if (init == ridpointers[(int)RID_DEFAULT])
 	    {
@@ -974,14 +1027,16 @@ grokfield (const cp_declarator *declarator,
 }
 
 /* Like `grokfield', but for bitfields.
-   WIDTH is non-NULL for bit fields only, and is an INTEGER_CST node.  */
+   WIDTH is the width of the bitfield, a constant expression.
+   The other parameters are as for grokfield.  */
 
 tree
 grokbitfield (const cp_declarator *declarator,
-	      cp_decl_specifier_seq *declspecs, tree width,
+	      cp_decl_specifier_seq *declspecs, tree width, tree init,
 	      tree attrlist)
 {
-  tree value = grokdeclarator (declarator, declspecs, BITFIELD, 0, &attrlist);
+  tree value = grokdeclarator (declarator, declspecs, BITFIELD,
+			       init != NULL_TREE, &attrlist);
 
   if (value == error_mark_node)
     return NULL_TREE; /* friends went bad.  */
@@ -1036,7 +1091,11 @@ grokbitfield (const cp_declarator *declarator,
       error ("static member %qD cannot be a bit-field", value);
       return NULL_TREE;
     }
-  cp_finish_decl (value, NULL_TREE, false, NULL_TREE, 0);
+
+  int flags = LOOKUP_IMPLICIT;
+  if (init && DIRECT_LIST_INIT_P (init))
+    flags = LOOKUP_NORMAL;
+  cp_finish_decl (value, init, false, NULL_TREE, flags);
 
   if (width != error_mark_node)
     {
@@ -1047,7 +1106,10 @@ grokbitfield (const cp_declarator *declarator,
 	       TREE_TYPE (width));
       else
 	{
-	  DECL_INITIAL (value) = width;
+	  /* Temporarily stash the width in DECL_BIT_FIELD_REPRESENTATIVE.
+	     check_bitfield_decl picks it from there later and sets DECL_SIZE
+	     accordingly.  */
+	  DECL_BIT_FIELD_REPRESENTATIVE (value) = width;
 	  SET_DECL_C_BIT_FIELD (value);
 	}
     }
@@ -1420,7 +1482,31 @@ cplus_decl_attributes (tree *decl, tree attributes, int flags)
 		       attributes, flags);
     }
   else
-    decl_attributes (decl, attributes, flags);
+    {
+      tree last_decl = (DECL_P (*decl) && DECL_NAME (*decl)
+			? lookup_name (DECL_NAME (*decl)) : NULL_TREE);
+
+      if (last_decl && TREE_CODE (last_decl) == OVERLOAD)
+	for (ovl_iterator iter (last_decl, true); ; ++iter)
+	  {
+	    if (!iter)
+	      {
+		last_decl = NULL_TREE;
+		break;
+	      }
+
+	    if (TREE_CODE (*iter) == OVERLOAD)
+	      continue;
+
+	    if (decls_match (*decl, *iter, /*record_decls=*/false))
+	      {
+		last_decl = *iter;
+		break;
+	      }
+	  }
+
+      decl_attributes (decl, attributes, flags, last_decl);
+    }
 
   if (TREE_CODE (*decl) == TYPE_DECL)
     SET_IDENTIFIER_TYPE_VALUE (DECL_NAME (*decl), TREE_TYPE (*decl));
@@ -2500,7 +2586,8 @@ constrain_class_visibility (tree type)
     vis = VISIBILITY_INTERNAL;
 
   for (t = TYPE_FIELDS (type); t; t = DECL_CHAIN (t))
-    if (TREE_CODE (t) == FIELD_DECL && TREE_TYPE (t) != error_mark_node)
+    if (TREE_CODE (t) == FIELD_DECL && TREE_TYPE (t) != error_mark_node
+	&& !DECL_ARTIFICIAL (t))
       {
 	tree ftype = strip_pointer_or_array_types (TREE_TYPE (t));
 	int subvis = type_visibility (ftype);
@@ -2972,7 +3059,7 @@ get_guard (tree decl)
   tree guard;
 
   sname = mangle_guard_variable (decl);
-  guard = IDENTIFIER_GLOBAL_VALUE (sname);
+  guard = get_global_binding (sname);
   if (! guard)
     {
       tree guard_type;
@@ -3140,7 +3227,7 @@ static tree
 get_local_tls_init_fn (void)
 {
   tree sname = get_identifier ("__tls_init");
-  tree fn = IDENTIFIER_GLOBAL_VALUE (sname);
+  tree fn = get_global_binding (sname);
   if (!fn)
     {
       fn = build_lang_decl (FUNCTION_DECL, sname,
@@ -3150,7 +3237,7 @@ get_local_tls_init_fn (void)
       TREE_PUBLIC (fn) = false;
       DECL_ARTIFICIAL (fn) = true;
       mark_used (fn);
-      SET_IDENTIFIER_GLOBAL_VALUE (sname, fn);
+      set_global_binding (fn);
     }
   return fn;
 }
@@ -3178,7 +3265,7 @@ get_tls_init_fn (tree var)
     return get_local_tls_init_fn ();
 
   tree sname = mangle_tls_init_fn (var);
-  tree fn = IDENTIFIER_GLOBAL_VALUE (sname);
+  tree fn = get_global_binding (sname);
   if (!fn)
     {
       fn = build_lang_decl (FUNCTION_DECL, sname,
@@ -3212,7 +3299,7 @@ get_tls_init_fn (tree var)
 
       DECL_BEFRIENDING_CLASSES (fn) = var;
 
-      SET_IDENTIFIER_GLOBAL_VALUE (sname, fn);
+      set_global_binding (fn);
     }
   return fn;
 }
@@ -3230,7 +3317,7 @@ get_tls_wrapper_fn (tree var)
     return NULL_TREE;
 
   tree sname = mangle_tls_wrapper_fn (var);
-  tree fn = IDENTIFIER_GLOBAL_VALUE (sname);
+  tree fn = get_global_binding (sname);
   if (!fn)
     {
       /* A named rvalue reference is an lvalue, so the wrapper should
@@ -3269,7 +3356,7 @@ get_tls_wrapper_fn (tree var)
 
       DECL_BEFRIENDING_CLASSES (fn) = var;
 
-      SET_IDENTIFIER_GLOBAL_VALUE (sname, fn);
+      set_global_binding (fn);
     }
   return fn;
 }
@@ -3315,7 +3402,7 @@ generate_tls_wrapper (tree fn)
     TREE_READONLY (fn) = true;
   finish_return_stmt (convert_from_reference (var));
   finish_function_body (body);
-  expand_or_defer_fn (finish_function (0));
+  expand_or_defer_fn (finish_function (/*inline_p=*/false));
 }
 
 /* Start the process of running a particular set of global constructors
@@ -3382,7 +3469,7 @@ finish_objects (int method_type, int initp, tree body)
 
   /* Finish up.  */
   finish_compound_stmt (body);
-  fn = finish_function (0);
+  fn = finish_function (/*inline_p=*/false);
 
   if (method_type == 'I')
     {
@@ -3471,7 +3558,8 @@ start_static_storage_duration_function (unsigned count)
       priority_info_map = splay_tree_new (splay_tree_compare_ints,
 					  /*delete_key_fn=*/0,
 					  /*delete_value_fn=*/
-					  (splay_tree_delete_value_fn) &free);
+					  (splay_tree_delete_value_fn)
+					  (void (*) (void)) free);
 
       /* We always need to generate functions for the
 	 DEFAULT_INIT_PRIORITY so enter it now.  That way when we walk
@@ -3522,7 +3610,7 @@ finish_static_storage_duration_function (tree body)
 {
   /* Close out the function.  */
   finish_compound_stmt (body);
-  expand_or_defer_fn (finish_function (0));
+  expand_or_defer_fn (finish_function (/*inline_p=*/false));
 }
 
 /* Return the information about the indicated PRIORITY level.  If no
@@ -4271,7 +4359,7 @@ handle_tls_init (void)
   finish_then_clause (if_stmt);
   finish_if_stmt (if_stmt);
   finish_function_body (body);
-  expand_or_defer_fn (finish_function (0));
+  expand_or_defer_fn (finish_function (/*inline_p=*/false));
 }
 
 /* We're at the end of compilation, so generate any mangling aliases that
@@ -4281,25 +4369,35 @@ handle_tls_init (void)
 static void
 generate_mangling_alias (tree decl, tree id2)
 {
+  struct cgraph_node *n = NULL;
+
+  if (TREE_CODE (decl) == FUNCTION_DECL)
+    {
+      n = cgraph_node::get (decl);
+      if (!n)
+	/* Don't create an alias to an unreferenced function.  */
+	return;
+    }
+
+  tree *slot
+    = mangled_decls->find_slot_with_hash (id2, IDENTIFIER_HASH_VALUE (id2),
+					  INSERT);
+
   /* If there's a declaration already using this mangled name,
      don't create a compatibility alias that conflicts.  */
-  if (IDENTIFIER_GLOBAL_VALUE (id2))
-    return;
-
-  struct cgraph_node *n = NULL;
-  if (TREE_CODE (decl) == FUNCTION_DECL
-      && !(n = cgraph_node::get (decl)))
-    /* Don't create an alias to an unreferenced function.  */
+  if (*slot)
     return;
 
   tree alias = make_alias_for (decl, id2);
-  SET_IDENTIFIER_GLOBAL_VALUE (id2, alias);
+  *slot = alias;
+
   DECL_IGNORED_P (alias) = 1;
   TREE_PUBLIC (alias) = TREE_PUBLIC (decl);
   DECL_VISIBILITY (alias) = DECL_VISIBILITY (decl);
   if (vague_linkage_p (decl))
     DECL_WEAK (alias) = 1;
-  if (TREE_CODE (decl) == FUNCTION_DECL)
+
+  if (n)
     n->create_same_body_alias (alias, decl);
   else
     varpool_node::create_extra_name_alias (alias, decl);
@@ -4338,6 +4436,76 @@ generate_mangling_aliases ()
   defer_mangling_aliases = false;
 }
 
+/* Record a mangling of DECL, whose DECL_ASSEMBLER_NAME has just been
+   set.  NEED_WARNING is true if we must warn about collisions.  We do
+   this to spot changes in mangling that may require compatibility
+   aliases.  */
+
+void
+record_mangling (tree decl, bool need_warning)
+{
+  if (!mangled_decls)
+    mangled_decls = hash_table<mangled_decl_hash>::create_ggc (499);
+
+  gcc_checking_assert (DECL_ASSEMBLER_NAME_SET_P (decl));
+  tree id = DECL_ASSEMBLER_NAME_RAW (decl);
+  tree *slot
+    = mangled_decls->find_slot_with_hash (id, IDENTIFIER_HASH_VALUE (id),
+					  INSERT);
+
+  /* If this is already an alias, remove the alias, because the real
+     decl takes precedence.  */
+  if (*slot && DECL_ARTIFICIAL (*slot) && DECL_IGNORED_P (*slot))
+    if (symtab_node *n = symtab_node::get (*slot))
+      if (n->cpp_implicit_alias)
+	{
+	  n->remove ();
+	  *slot = NULL_TREE;
+	}
+
+  if (!*slot)
+    *slot = decl;
+  else if (need_warning)
+    {
+      error_at (DECL_SOURCE_LOCATION (decl),
+		"mangling of %q#D as %qE conflicts with a previous mangle",
+		decl, id);
+      inform (DECL_SOURCE_LOCATION (*slot),
+	      "previous mangling %q#D", *slot);
+      inform (DECL_SOURCE_LOCATION (decl),
+	      "a later -fabi-version= (or =0)"
+	      " avoids this error with a change in mangling");
+      *slot = decl;
+    }
+}
+
+/* The mangled name of DECL is being forcibly changed to NAME.  Remove
+   any existing knowledge of DECL's mangled name meaning DECL.  */
+
+void
+overwrite_mangling (tree decl, tree name)
+{
+  if (tree id = DECL_ASSEMBLER_NAME_RAW (decl))
+    if ((TREE_CODE (decl) == VAR_DECL
+	 || TREE_CODE (decl) == FUNCTION_DECL)
+	&& mangled_decls)
+      if (tree *slot
+	  = mangled_decls->find_slot_with_hash (id, IDENTIFIER_HASH_VALUE (id),
+						NO_INSERT))
+	if (*slot == decl)
+	  {
+	    mangled_decls->clear_slot (slot);
+
+	    /* If this is an alias, remove it from the symbol table.  */
+	    if (DECL_ARTIFICIAL (decl) && DECL_IGNORED_P (decl))
+	      if (symtab_node *n = symtab_node::get (decl))
+		if (n->cpp_implicit_alias)
+		  n->remove ();
+	  }
+
+  DECL_ASSEMBLER_NAME_RAW (decl) = name;
+}
+
 /* The entire file is now complete.  If requested, dump everything
    to a file.  */
 
@@ -4363,7 +4531,7 @@ maybe_warn_sized_delete (enum tree_code code)
   tree sized = NULL_TREE;
   tree unsized = NULL_TREE;
 
-  for (ovl_iterator iter (IDENTIFIER_GLOBAL_VALUE (cp_operator_id (code)));
+  for (ovl_iterator iter (get_global_binding (ovl_op_identifier (false, code)));
        iter; ++iter)
     {
       tree fn = *iter;
@@ -5009,11 +5177,11 @@ mark_used (tree decl, tsubst_flags_t complain)
       && DECL_DELETED_FN (decl))
     {
       if (DECL_ARTIFICIAL (decl)
-	  && DECL_OVERLOADED_OPERATOR_P (decl) == TYPE_EXPR
+	  && DECL_CONV_FN_P (decl)
 	  && LAMBDA_TYPE_P (DECL_CONTEXT (decl)))
 	/* We mark a lambda conversion op as deleted if we can't
 	   generate it properly; see maybe_add_lambda_conv_op.  */
-	sorry ("converting lambda which uses %<...%> to function pointer");
+	sorry ("converting lambda that uses %<...%> to function pointer");
       else if (complain & tf_error)
 	{
 	  error ("use of deleted function %qD", decl);
@@ -5185,7 +5353,7 @@ vtv_finish_verification_constructor_init_function (tree function_body)
   tree fn;
 
   finish_compound_stmt (function_body);
-  fn = finish_function (0);
+  fn = finish_function (/*inline_p=*/false);
   DECL_STATIC_CONSTRUCTOR (fn) = 1;
   decl_init_priority_insert (fn, MAX_RESERVED_INIT_PRIORITY - 1);
 

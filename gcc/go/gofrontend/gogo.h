@@ -117,7 +117,7 @@ class Import_init
 // For sorting purposes.
 
 struct Import_init_lt {
-  bool operator()(const Import_init* i1, const Import_init* i2)
+  bool operator()(const Import_init* i1, const Import_init* i2) const
   {
     return i1->init_name() < i2->init_name();
   }
@@ -318,6 +318,20 @@ class Gogo
   set_debug_escape_level(int level)
   { this->debug_escape_level_ = level; }
 
+  // Return the size threshold used to determine whether to issue
+  // a nil-check for a given pointer dereference. A threshold of -1
+  // implies that all potentially faulting dereference ops should
+  // be nil-checked. A positive threshold of N implies that a deref
+  // of *P where P has size less than N doesn't need a nil check.
+  int64_t
+  nil_check_size_threshold() const
+  { return this->nil_check_size_threshold_; }
+
+  // Set the nil-check size threshold, as described above.
+  void
+  set_nil_check_size_threshold(int64_t bytes)
+  { this->nil_check_size_threshold_ = bytes; }
+
   // Import a package.  FILENAME is the file name argument, LOCAL_NAME
   // is the local name to give to the package.  If LOCAL_NAME is empty
   // the declarations are added to the global scope.
@@ -505,26 +519,6 @@ class Gogo
   // used when there is a parse error to avoid useless errors.
   void
   mark_locals_used();
-
-  // Return a name to use for an error case.  This should only be used
-  // after reporting an error, and is used to avoid useless knockon
-  // errors.
-  static std::string
-  erroneous_name();
-
-  // Return whether the name indicates an error.
-  static bool
-  is_erroneous_name(const std::string&);
-
-  // Return a name to use for a thunk function.  A thunk function is
-  // one we create during the compilation, for a go statement or a
-  // defer statement or a method expression.
-  static std::string
-  thunk_name();
-
-  // Return whether an object is a thunk.
-  static bool
-  is_thunk(const Named_object*);
 
   // Note that we've seen an interface type.  This is used to build
   // all required interface method tables.
@@ -781,9 +775,107 @@ class Gogo
   Expression*
   allocate_memory(Type *type, Location);
 
+  // Return the assembler name to use for an exported function, a
+  // method, or a function/method declaration.
+  std::string
+  function_asm_name(const std::string& go_name, const Package*,
+		    const Type* receiver);
+
+  // Return the name to use for a function descriptor.
+  std::string
+  function_descriptor_name(Named_object*);
+
+  // Return the name to use for a generated stub method.
+  std::string
+  stub_method_name(const std::string& method_name);
+
+  // Return the names of the hash and equality functions for TYPE.
+  void
+  specific_type_function_names(const Type*, const Named_type*,
+			       std::string* hash_name,
+			       std::string* equal_name);
+
+  // Return the assembler name to use for a global variable.
+  std::string
+  global_var_asm_name(const std::string& go_name, const Package*);
+
+  // Return a name to use for an error case.  This should only be used
+  // after reporting an error, and is used to avoid useless knockon
+  // errors.
+  static std::string
+  erroneous_name();
+
+  // Return whether the name indicates an error.
+  static bool
+  is_erroneous_name(const std::string&);
+
+  // Return a name to use for a thunk function.  A thunk function is
+  // one we create during the compilation, for a go statement or a
+  // defer statement or a method expression.
+  static std::string
+  thunk_name();
+
+  // Return whether an object is a thunk.
+  static bool
+  is_thunk(const Named_object*);
+
+  // Return the name to use for an init function.
+  std::string
+  init_function_name();
+
+  // Return the name to use for a nested function.
+  static std::string
+  nested_function_name();
+
+  // Return the index of a nested function name.
+  static int
+  nested_function_num(const std::string&);
+
+  // Return the name to use for a sink funciton.
+  std::string
+  sink_function_name();
+
+  // Return the name to use for an (erroneous) redefined function.
+  std::string
+  redefined_function_name();
+
+  // Return the name for use for a recover thunk.
+  std::string
+  recover_thunk_name(const std::string& name, const Type* rtype);
+
+  // Return the name to use for the GC root variable.
+  std::string
+  gc_root_name();
+
+  // Return the name to use for a composite literal or string
+  // initializer.
+  std::string
+  initializer_name();
+
+  // Return the name of the variable used to represent the zero value
+  // of a map.
+  std::string
+  map_zero_value_name();
+
   // Get the name of the magic initialization function.
   const std::string&
   get_init_fn_name();
+
+  // Return the name for a type descriptor symbol.
+  std::string
+  type_descriptor_name(Type*, Named_type*);
+
+  // Return the assembler name for the GC symbol for a type.
+  std::string
+  gc_symbol_name(Type*);
+
+  // Return the assembler name for a ptrmask variable.
+  std::string
+  ptrmask_symbol_name(const std::string& ptrmask_sym_name);
+
+  // Return the name to use for an interface method table.
+  std::string
+  interface_method_table_name(Interface_type*, Type*, bool is_pointer);
 
  private:
   // During parsing, we keep a stack of functions.  Each function on
@@ -947,6 +1039,8 @@ class Gogo
   // The level of escape analysis debug information to emit, from the
   // -fgo-debug-escape option.
   int debug_escape_level_;
+  // Nil-check size threshhold.
+  int64_t nil_check_size_threshold_;
   // A list of types to verify.
   std::vector<Type*> verify_types_;
   // A list of interface types defined while parsing.

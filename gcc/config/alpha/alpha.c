@@ -2910,8 +2910,8 @@ alpha_split_conditional_move (enum rtx_code code, rtx dest, rtx cond,
       || (code == GE || code == GT))
     {
       code = reverse_condition (code);
-      diff = t, t = f, f = diff;
-      diff = t - f;
+      std::swap (t, f);
+      diff = -diff;
     }
 
   subtarget = target = dest;
@@ -6078,10 +6078,8 @@ alpha_stdarg_optimize_hook (struct stdarg_info *si, const gimple *stmt)
 	  else if (code2 == COMPONENT_REF
 		   && (code1 == MINUS_EXPR || code1 == PLUS_EXPR))
 	    {
-	      gimple *tem = arg1_stmt;
+	      std::swap (arg1_stmt, arg2_stmt);
 	      code2 = code1;
-	      arg1_stmt = arg2_stmt;
-	      arg2_stmt = tem;
 	    }
 	  else
 	    goto escapes;
@@ -7508,9 +7506,10 @@ common_object_handler (tree *node, tree name ATTRIBUTE_UNUSED,
 static const struct attribute_spec vms_attribute_table[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { COMMON_OBJECT,   0, 1, true,  false, false, common_object_handler, false },
-  { NULL,            0, 0, false, false, false, NULL, false }
+       affects_type_identity, exclusions } */
+  { COMMON_OBJECT,   0, 1, true,  false, false, common_object_handler, false,
+    NULL },
+  { NULL,            0, 0, false, false, false, NULL, false, NULL }
 };
 
 void
@@ -9831,9 +9830,7 @@ alpha_canonicalize_comparison (int *code, rtx *op0, rtx *op1,
       && (*code == GE || *code == GT || *code == GEU || *code == GTU)
       && (REG_P (*op1) || *op1 == const0_rtx))
     {
-      rtx tem = *op0;
-      *op0 = *op1;
-      *op1 = tem;
+      std::swap (*op0, *op1);
       *code = (int)swap_condition ((enum rtx_code)*code);
     }
 

@@ -144,8 +144,8 @@ Expression::convert_for_assignment(Gogo*, Type* lhs_type,
       || rhs->is_error_expression())
     return Expression::make_error(location);
 
-  if (lhs_type->forwarded() != rhs_type->forwarded()
-      && lhs_type->interface_type() != NULL)
+  bool are_identical = Type::are_identical(lhs_type, rhs_type, false, NULL);
+  if (!are_identical && lhs_type->interface_type() != NULL)
     {
       if (rhs_type->interface_type() == NULL)
         return Expression::convert_type_to_interface(lhs_type, rhs, location);
@@ -153,8 +153,7 @@ Expression::convert_for_assignment(Gogo*, Type* lhs_type,
         return Expression::convert_interface_to_interface(lhs_type, rhs, false,
                                                           location);
     }
-  else if (lhs_type->forwarded() != rhs_type->forwarded()
-	   && rhs_type->interface_type() != NULL)
+  else if (!are_identical && rhs_type->interface_type() != NULL)
     return Expression::convert_interface_to_type(lhs_type, rhs, location);
   else if (lhs_type->is_slice_type() && rhs_type->is_nil_type())
     {
@@ -165,8 +164,15 @@ Expression::convert_for_assignment(Gogo*, Type* lhs_type,
     }
   else if (rhs_type->is_nil_type())
     return Expression::make_nil(location);
-  else if (Type::are_identical(lhs_type, rhs_type, false, NULL))
+  else if (are_identical)
     {
+      if (lhs_type->forwarded() != rhs_type->forwarded())
+	{
+	  // Different but identical types require an explicit
+	  // conversion.  This happens with type aliases.
+	  return Expression::make_cast(lhs_type, rhs, location);
+	}
+
       // No conversion is needed.
       return rhs;
     }
@@ -284,7 +290,7 @@ Expression::get_interface_type_descriptor(Expression* rhs)
       Expression::make_interface_info(rhs, INTERFACE_INFO_METHODS, location);
 
   Expression* descriptor =
-      Expression::make_unary(OPERATOR_MULT, mtable, location);
+      Expression::make_dereference(mtable, NIL_CHECK_NOT_NEEDED, location);
   descriptor = Expression::make_field_reference(descriptor, 0, location);
   Expression* nil = Expression::make_nil(location);
 
@@ -387,7 +393,8 @@ Expression::convert_interface_to_type(Type *lhs_type, Expression* rhs,
     {
       obj = Expression::make_unsafe_cast(Type::make_pointer_type(lhs_type), obj,
                                          location);
-      obj = Expression::make_unary(OPERATOR_MULT, obj, location);
+      obj = Expression::make_dereference(obj, NIL_CHECK_NOT_NEEDED,
+                                         location);
     }
   return Expression::make_compound(check_iface, obj, location);
 }
@@ -765,7 +772,7 @@ Var_expression::do_get_backend(Translate_context* context)
     go_unreachable();
 
   Bexpression* ret =
-      context->backend()->var_expression(bvar, this->in_lvalue_pos_, loc);
+      context->backend()->var_expression(bvar, loc);
   if (is_in_heap)
     ret = context->backend()->indirect_expression(btype, ret, true, loc);
   return ret;
@@ -892,10 +899,7 @@ Temporary_reference_expression::do_get_backend(Translate_context* context)
 {
   Gogo* gogo = context->gogo();
   Bvariable* bvar = this->statement_->get_backend_variable(context);
-  Varexpr_context ve_ctxt = (this->is_lvalue_ ? VE_lvalue : VE_rvalue);
-
-  Bexpression* ret = gogo->backend()->var_expression(bvar, ve_ctxt,
-                                                     this->location());
+  Bexpression* ret = gogo->backend()->var_expression(bvar, this->location());
 
   // The backend can't always represent the same set of recursive types
   // that the Go frontend can.  In some cases this means that a
@@ -966,7 +970,7 @@ Set_and_use_temporary_expression::do_get_backend(Translate_context* context)
   Location loc = this->location();
   Gogo* gogo = context->gogo();
   Bvariable* bvar = this->statement_->get_backend_variable(context);
-  Bexpression* lvar_ref = gogo->backend()->var_expression(bvar, VE_lvalue, loc);
+  Bexpression* lvar_ref = gogo->backend()->var_expression(bvar, loc);
 
   Named_object* fn = context->function();
   go_assert(fn != NULL);
@@ -974,7 +978,7 @@ Set_and_use_temporary_expression::do_get_backend(Translate_context* context)
   Bexpression* bexpr = this->expr_->get_backend(context);
   Bstatement* set = gogo->backend()->assignment_statement(bfn, lvar_ref,
                                                           bexpr, loc);
-  Bexpression* var_ref = gogo->backend()->var_expression(bvar, VE_rvalue, loc);
+  Bexpression* var_ref = gogo->backend()->var_expression(bvar, loc);
   Bexpression* ret = gogo->backend()->compound_expression(set, var_ref, loc);
   return ret;
 }
@@ -1078,11 +1082,11 @@ Sink_expression::do_get_backend(Translate_context* context)
 	gogo->backend()->temporary_variable(fn_ctx, context->bblock(), bt, NULL,
 					    false, loc, &decl);
       Bexpression* var_ref =
-          gogo->backend()->var_expression(this->bvar_, VE_lvalue, loc);
+          gogo->backend()->var_expression(this->bvar_, loc);
       var_ref = gogo->backend()->compound_expression(decl, var_ref, loc);
       return var_ref;
     }
-  return gogo->backend()->var_expression(this->bvar_, VE_lvalue, loc);
+  return gogo->backend()->var_expression(this->bvar_, loc);
 }
 
 // Ast dump for sink expression.
@@ -1296,31 +1300,15 @@ Func_descriptor_expression::do_get_backend(Translate_context* context)
   Named_object* no = this->fn_;
   Location loc = no->location();
   if (this->dvar_ != NULL)
-    return context->backend()->var_expression(this->dvar_, VE_rvalue, loc);
+    return context->backend()->var_expression(this->dvar_, loc);
 
   Gogo* gogo = context->gogo();
-  std::string var_name;
+  std::string var_name(gogo->function_descriptor_name(no));
   bool is_descriptor = false;
   if (no->is_function_declaration()
       && !no->func_declaration_value()->asm_name().empty()
       && Linemap::is_predeclared_location(no->location()))
-    {
-      if (no->func_declaration_value()->asm_name().substr(0, 8) != "runtime.")
-	var_name = no->func_declaration_value()->asm_name() + "_descriptor";
-      else
-	var_name = no->func_declaration_value()->asm_name() + "$descriptor";
-      is_descriptor = true;
-    }
-  else
-    {
-      if (no->package() == NULL)
-	var_name = gogo->pkgpath_symbol();
-      else
-	var_name = no->package()->pkgpath_symbol();
-      var_name.push_back('.');
-      var_name.append(Gogo::unpack_hidden_name(no->name()));
-      var_name.append("$descriptor");
-    }
+    is_descriptor = true;
 
   Btype* btype = this->type()->get_backend(gogo);
 
@@ -1350,7 +1338,7 @@ Func_descriptor_expression::do_get_backend(Translate_context* context)
     }
 
   this->dvar_ = bvar;
-  return gogo->backend()->var_expression(bvar, VE_rvalue, loc);
+  return gogo->backend()->var_expression(bvar, loc);
 }
 
 // Print a function descriptor expression.
@@ -3855,24 +3843,20 @@ Unary_expression::do_flatten(Gogo* gogo, Named_object*,
       && !this->expr_->is_variable())
     {
       go_assert(this->expr_->type()->points_to() != NULL);
-      Type* ptype = this->expr_->type()->points_to();
-      if (!ptype->is_void_type())
+      switch (this->requires_nil_check(gogo))
         {
-          int64_t s;
-          bool ok = ptype->backend_type_size(gogo, &s);
-          if (!ok)
+          case NIL_CHECK_ERROR_ENCOUNTERED:
             {
               go_assert(saw_errors());
               return Expression::make_error(this->location());
             }
-          if (s >= 4096 || this->issue_nil_check_)
-            {
-              Temporary_statement* temp =
-                  Statement::make_temporary(NULL, this->expr_, location);
-              inserter->insert(temp);
-              this->expr_ =
-                  Expression::make_temporary_reference(temp, location);
-            }
+          case NIL_CHECK_NOT_NEEDED:
+            break;
+          case NIL_CHECK_NEEDED:
+            this->create_temp_ = true;
+            break;
+          case NIL_CHECK_DEFAULT:
+            go_unreachable();
         }
     }
 
@@ -3971,6 +3955,41 @@ Unary_expression::base_is_static_initializer(Expression* expr)
     return true;
 
   return false;
+}
+
+// Return whether this dereference expression requires an explicit nil
+// check. If we are dereferencing the pointer to a large struct
+// (greater than the specified size threshold), we need to check for
+// nil. We don't bother to check for small structs because we expect
+// the system to crash on a nil pointer dereference. However, if we
+// know the address of this expression is being taken, we must always
+// check for nil.
+Unary_expression::Nil_check_classification
+Unary_expression::requires_nil_check(Gogo* gogo) 
+{
+  go_assert(this->op_ == OPERATOR_MULT);
+  go_assert(this->expr_->type()->points_to() != NULL);
+
+  if (this->issue_nil_check_ == NIL_CHECK_NEEDED)
+    return NIL_CHECK_NEEDED;
+  else if (this->issue_nil_check_ == NIL_CHECK_NOT_NEEDED)
+    return NIL_CHECK_NOT_NEEDED;
+
+  Type* ptype = this->expr_->type()->points_to();
+  int64_t type_size = -1;
+  if (!ptype->is_void_type())
+    {
+      bool ok = ptype->backend_type_size(gogo, &type_size);
+      if (!ok)
+        return NIL_CHECK_ERROR_ENCOUNTERED;
+    }
+
+  int64_t size_cutoff = gogo->nil_check_size_threshold();
+  if (size_cutoff == -1 || (type_size != -1 && type_size >= size_cutoff))
+    this->issue_nil_check_ = NIL_CHECK_NEEDED;
+  else
+    this->issue_nil_check_ = NIL_CHECK_NOT_NEEDED;
+  return this->issue_nil_check_;
 }
 
 // Apply unary opcode OP to UNC, setting NC.  Return true if this
@@ -4296,7 +4315,7 @@ Unary_expression::do_get_backend(Translate_context* context)
 	  Temporary_statement* temp = sut->temporary();
 	  Bvariable* bvar = temp->get_backend_variable(context);
           Bexpression* bvar_expr =
-              gogo->backend()->var_expression(bvar, VE_lvalue, loc);
+              gogo->backend()->var_expression(bvar, loc);
           Bexpression* bval = sut->expression()->get_backend(context);
 
           Named_object* fn = context->function();
@@ -4348,27 +4367,23 @@ Unary_expression::do_get_backend(Translate_context* context)
 	    }
 	}
 
-      static unsigned int counter;
-      char buf[100];
       if (this->is_gc_root_ || this->is_slice_init_)
 	{
+	  std::string var_name;
 	  bool copy_to_heap = false;
 	  if (this->is_gc_root_)
 	    {
 	      // Build a decl for a GC root variable.  GC roots are mutable, so
 	      // they cannot be represented as an immutable_struct in the
 	      // backend.
-	      static unsigned int root_counter;
-	      snprintf(buf, sizeof buf, "gc%u", root_counter);
-	      ++root_counter;
+	      var_name = gogo->gc_root_name();
 	    }
 	  else
 	    {
 	      // Build a decl for a slice value initializer.  An immutable slice
 	      // value initializer may have to be copied to the heap if it
 	      // contains pointers in a non-constant context.
-	      snprintf(buf, sizeof buf, "C%u", counter);
-	      ++counter;
+	      var_name = gogo->initializer_name();
 
 	      Array_type* at = this->expr_->type()->array_type();
 	      go_assert(at != NULL);
@@ -4379,15 +4394,15 @@ Unary_expression::do_get_backend(Translate_context* context)
 	      // read-only, because the program is permitted to change it.
 	      copy_to_heap = context->function() != NULL;
 	    }
-          std::string asm_name(go_selectively_encode_id(buf));
+	  std::string asm_name(go_selectively_encode_id(var_name));
 	  Bvariable* implicit =
-              gogo->backend()->implicit_variable(buf, asm_name,
+              gogo->backend()->implicit_variable(var_name, asm_name,
                                                  btype, true, copy_to_heap,
                                                  false, 0);
-	  gogo->backend()->implicit_variable_set_init(implicit, buf, btype,
+	  gogo->backend()->implicit_variable_set_init(implicit, var_name, btype,
 						      true, copy_to_heap, false,
 						      bexpr);
-	  bexpr = gogo->backend()->var_expression(implicit, VE_rvalue, loc);
+	  bexpr = gogo->backend()->var_expression(implicit, loc);
 
 	  // If we are not copying a slice initializer to the heap,
 	  // then it can be changed by the program, so if it can
@@ -4397,7 +4412,7 @@ Unary_expression::do_get_backend(Translate_context* context)
 	      && this->expr_->type()->has_pointer())
 	    {
 	      Bexpression* root =
-                  gogo->backend()->var_expression(implicit, VE_rvalue, loc);
+                  gogo->backend()->var_expression(implicit, loc);
 	      root = gogo->backend()->address_expression(root, loc);
 	      Type* type = Type::make_pointer_type(this->expr_->type());
 	      gogo->add_gc_root(Expression::make_backend(root, type, loc));
@@ -4407,17 +4422,14 @@ Unary_expression::do_get_backend(Translate_context* context)
 		|| this->expr_->string_expression() != NULL)
 	       && this->expr_->is_static_initializer())
         {
-	  // Build a decl for a constant constructor.
-          snprintf(buf, sizeof buf, "C%u", counter);
-          ++counter;
-
-          std::string asm_name(go_selectively_encode_id(buf));
+	  std::string var_name(gogo->initializer_name());
+	  std::string asm_name(go_selectively_encode_id(var_name));
           Bvariable* decl =
-              gogo->backend()->immutable_struct(buf, asm_name,
+              gogo->backend()->immutable_struct(var_name, asm_name,
                                                 true, false, btype, loc);
-          gogo->backend()->immutable_struct_set_init(decl, buf, true, false,
-                                                     btype, loc, bexpr);
-          bexpr = gogo->backend()->var_expression(decl, VE_rvalue, loc);
+          gogo->backend()->immutable_struct_set_init(decl, var_name, true,
+						     false, btype, loc, bexpr);
+          bexpr = gogo->backend()->var_expression(decl, loc);
         }
 
       go_assert(!this->create_temp_ || this->expr_->is_variable());
@@ -4428,43 +4440,55 @@ Unary_expression::do_get_backend(Translate_context* context)
       {
         go_assert(this->expr_->type()->points_to() != NULL);
 
-	// If we are dereferencing the pointer to a large struct, we
-	// need to check for nil.  We don't bother to check for small
-	// structs because we expect the system to crash on a nil
-	// pointer dereference.	 However, if we know the address of this
-	// expression is being taken, we must always check for nil.
-
+        bool known_valid = false;
         Type* ptype = this->expr_->type()->points_to();
         Btype* pbtype = ptype->get_backend(gogo);
-        if (!ptype->is_void_type())
-	  {
-            int64_t s;
-            bool ok = ptype->backend_type_size(gogo, &s);
-            if (!ok)
+        switch (this->requires_nil_check(gogo))
+          {
+            case NIL_CHECK_NOT_NEEDED:
+              break;
+            case NIL_CHECK_ERROR_ENCOUNTERED:
               {
                 go_assert(saw_errors());
                 return gogo->backend()->error_expression();
               }
-	    if (s >= 4096 || this->issue_nil_check_)
-	      {
+            case NIL_CHECK_NEEDED:
+              {
                 go_assert(this->expr_->is_variable());
+
+                // If we're nil-checking the result of a set-and-use-temporary
+                // expression, then pick out the target temp and use that
+                // for the final result of the conditional.
+                Bexpression* tbexpr = bexpr;
+                Bexpression* ubexpr = bexpr;
+                Set_and_use_temporary_expression* sut =
+                    this->expr_->set_and_use_temporary_expression();
+                if (sut != NULL) {
+                  Temporary_statement* temp = sut->temporary();
+                  Bvariable* bvar = temp->get_backend_variable(context);
+                  ubexpr = gogo->backend()->var_expression(bvar, loc);
+                }
                 Bexpression* nil =
-		  Expression::make_nil(loc)->get_backend(context);
+                    Expression::make_nil(loc)->get_backend(context);
                 Bexpression* compare =
-                    gogo->backend()->binary_expression(OPERATOR_EQEQ, bexpr,
+                    gogo->backend()->binary_expression(OPERATOR_EQEQ, tbexpr,
                                                        nil, loc);
                 Bexpression* crash =
-		  gogo->runtime_error(RUNTIME_ERROR_NIL_DEREFERENCE,
-				      loc)->get_backend(context);
+                    gogo->runtime_error(RUNTIME_ERROR_NIL_DEREFERENCE,
+                                        loc)->get_backend(context);
                 Bfunction* bfn = context->function()->func_value()->get_decl();
                 bexpr = gogo->backend()->conditional_expression(bfn, btype,
                                                                 compare,
-                                                                crash, bexpr,
+                                                                crash, ubexpr,
                                                                 loc);
-
-	      }
-	  }
-        ret = gogo->backend()->indirect_expression(pbtype, bexpr, false, loc);
+                known_valid = true;
+                break;
+              }
+            case NIL_CHECK_DEFAULT:
+              go_unreachable();
+          }
+        ret = gogo->backend()->indirect_expression(pbtype, bexpr,
+                                                   known_valid, loc);
       }
       break;
 
@@ -4547,6 +4571,19 @@ Expression*
 Expression::make_unary(Operator op, Expression* expr, Location location)
 {
   return new Unary_expression(op, expr, location);
+}
+
+Expression*
+Expression::make_dereference(Expression* ptr,
+                             Nil_check_classification docheck,
+                             Location location)
+{
+  Expression* deref = Expression::make_unary(OPERATOR_MULT, ptr, location);
+  if (docheck == NIL_CHECK_NEEDED)
+    deref->unary_expression()->set_requires_nil_check(true);
+  else if (docheck == NIL_CHECK_NOT_NEEDED)
+    deref->unary_expression()->set_requires_nil_check(false);
+  return deref;
 }
 
 // If this is an indirection through a pointer, return the expression
@@ -6849,7 +6886,7 @@ Bound_method_expression::create_thunk(Gogo* gogo, const Method* method,
   // Field 0 of the closure is the function code pointer, field 1 is
   // the value on which to invoke the method.
   Expression* arg = Expression::make_var_reference(cp, loc);
-  arg = Expression::make_unary(OPERATOR_MULT, arg, loc);
+  arg = Expression::make_dereference(arg, NIL_CHECK_NOT_NEEDED, loc);
   arg = Expression::make_field_reference(arg, 1, loc);
 
   Expression* bme = Expression::make_bound_method(arg, method, fn, loc);
@@ -6913,7 +6950,8 @@ bme_check_nil(const Method::Field_indexes* field_indexes, Location loc,
 					      Expression::make_nil(loc),
 					      loc);
       cond = Expression::make_binary(OPERATOR_OROR, cond, n, loc);
-      *ref = Expression::make_unary(OPERATOR_MULT, *ref, loc);
+      *ref = Expression::make_dereference(*ref, Expression::NIL_CHECK_DEFAULT,
+                                          loc);
       go_assert((*ref)->type()->struct_type() == stype);
     }
   *ref = Expression::make_field_reference(*ref, field_indexes->field_index,
@@ -6968,7 +7006,7 @@ Bound_method_expression::do_flatten(Gogo* gogo, Named_object*,
   Expression* val = expr;
   if (fntype->receiver()->type()->points_to() == NULL
       && val->type()->points_to() != NULL)
-    val = Expression::make_unary(OPERATOR_MULT, val, loc);
+    val = Expression::make_dereference(val, NIL_CHECK_DEFAULT, loc);
 
   // Note that we are ignoring this->expr_type_ here.  The thunk will
   // expect a closure whose second field has type this->expr_type_ (if
@@ -8939,7 +8977,8 @@ Builtin_call_expression::do_get_backend(Translate_context* context)
 	    arg_type = arg_type->points_to();
 	    go_assert(arg_type->array_type() != NULL
 		       && !arg_type->is_slice_type());
-            arg = Expression::make_unary(OPERATOR_MULT, arg, location);
+            arg = Expression::make_dereference(arg, NIL_CHECK_DEFAULT,
+                                               location);
 	  }
 
 	Type* int_type = Type::lookup_integer_type("int");
@@ -8973,8 +9012,9 @@ Builtin_call_expression::do_get_backend(Translate_context* context)
 							  arg, nil, location);
 		Expression* zero = Expression::make_integer_ul(0, int_type,
 							       location);
-		Expression* indir = Expression::make_unary(OPERATOR_MULT,
-							   arg, location);
+                Expression* indir =
+                    Expression::make_dereference(arg, NIL_CHECK_NOT_NEEDED,
+                                                 location);
 		val = Expression::make_conditional(cmp, zero, indir, location);
 	      }
 	    else
@@ -9015,8 +9055,9 @@ Builtin_call_expression::do_get_backend(Translate_context* context)
 							  arg, nil, location);
 		Expression* zero = Expression::make_integer_ul(0, int_type,
 							       location);
-		Expression* indir = Expression::make_unary(OPERATOR_MULT,
-							   parg, location);
+                Expression* indir =
+                    Expression::make_dereference(parg, NIL_CHECK_NOT_NEEDED,
+                                                 location);
 		val = Expression::make_conditional(cmp, zero, indir, location);
 	      }
 	    else
@@ -10294,7 +10335,7 @@ Call_expression::do_get_backend(Translate_context* context)
           Type::make_pointer_type(
               Type::make_pointer_type(Type::make_void_type()));
       fn = Expression::make_unsafe_cast(pfntype, this->fn_, location);
-      fn = Expression::make_unary(OPERATOR_MULT, fn, location);
+      fn = Expression::make_dereference(fn, NIL_CHECK_NOT_NEEDED, location);
     }
   else
     {
@@ -10552,8 +10593,8 @@ Index_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
 	   && type->points_to()->array_type() != NULL
 	   && !type->points_to()->is_slice_type())
     {
-      Expression* deref = Expression::make_unary(OPERATOR_MULT, left,
-						 location);
+      Expression* deref =
+          Expression::make_dereference(left, NIL_CHECK_DEFAULT, location);
 
       // For an ordinary index into the array, the pointer will be
       // dereferenced.  For a slice it will not--the resulting slice
@@ -11317,7 +11358,8 @@ String_index_expression::do_get_backend(Translate_context* context)
   Location loc = this->location();
   Expression* string_arg = this->string_;
   if (this->string_->type()->points_to() != NULL)
-    string_arg = Expression::make_unary(OPERATOR_MULT, this->string_, loc);
+    string_arg = Expression::make_dereference(this->string_,
+                                              NIL_CHECK_NOT_NEEDED, loc);
 
   Expression* bad_index = Expression::check_bounds(this->start_, loc);
 
@@ -11551,8 +11593,9 @@ Map_index_expression::do_get_backend(Translate_context* context)
   go_assert(this->value_pointer_ != NULL
             && this->value_pointer_->is_variable());
 
-  Expression* val = Expression::make_unary(OPERATOR_MULT, this->value_pointer_,
-					   this->location());
+  Expression* val = Expression::make_dereference(this->value_pointer_,
+                                                 NIL_CHECK_NOT_NEEDED,
+                                                 this->location());
   return val->get_backend(context);
 }
 
@@ -11788,7 +11831,7 @@ Interface_field_reference_expression::get_function()
   Expression* ref = this->expr_;
   Location loc = this->location();
   if (ref->type()->points_to() != NULL)
-    ref = Expression::make_unary(OPERATOR_MULT, ref, loc);
+    ref = Expression::make_dereference(ref, NIL_CHECK_DEFAULT, loc);
 
   Expression* mtable =
       Expression::make_interface_info(ref, INTERFACE_INFO_METHODS, loc);
@@ -11798,7 +11841,8 @@ Interface_field_reference_expression::get_function()
   unsigned int index;
   const Struct_field* field = mtable_type->find_local_field(name, &index);
   go_assert(field != NULL);
-  mtable = Expression::make_unary(OPERATOR_MULT, mtable, loc);
+
+  mtable = Expression::make_dereference(mtable, NIL_CHECK_NOT_NEEDED, loc);
   return Expression::make_field_reference(mtable, index, loc);
 }
 
@@ -11810,7 +11854,8 @@ Interface_field_reference_expression::get_underlying_object()
 {
   Expression* expr = this->expr_;
   if (expr->type()->points_to() != NULL)
-    expr = Expression::make_unary(OPERATOR_MULT, expr, this->location());
+    expr = Expression::make_dereference(expr, NIL_CHECK_DEFAULT,
+                                        this->location());
   return Expression::make_interface_info(expr, INTERFACE_INFO_OBJECT,
                                          this->location());
 }
@@ -11983,7 +12028,7 @@ Interface_field_reference_expression::create_thunk(Gogo* gogo,
   // Field 0 of the closure is the function code pointer, field 1 is
   // the value on which to invoke the method.
   Expression* arg = Expression::make_var_reference(cp, loc);
-  arg = Expression::make_unary(OPERATOR_MULT, arg, loc);
+  arg = Expression::make_dereference(arg, NIL_CHECK_NOT_NEEDED, loc);
   arg = Expression::make_field_reference(arg, 1, loc);
 
   Expression *ifre = Expression::make_interface_field_reference(arg, name,
@@ -14326,7 +14371,7 @@ Heap_expression::do_get_backend(Translate_context* context)
   Bstatement* assn;
   if (!etype->has_pointer())
     {
-      space = gogo->backend()->var_expression(space_temp, VE_lvalue, loc);
+      space = gogo->backend()->var_expression(space_temp, loc);
       Bexpression* ref =
 	gogo->backend()->indirect_expression(expr_btype, space, true, loc);
       assn = gogo->backend()->assignment_statement(fndecl, ref, bexpr, loc);
@@ -14339,12 +14384,12 @@ Heap_expression::do_get_backend(Translate_context* context)
 					    expr_btype, bexpr, true, loc,
 					    &edecl);
       Bexpression* btempref = gogo->backend()->var_expression(btemp,
-							      VE_lvalue, loc);
+							      loc);
       Bexpression* addr = gogo->backend()->address_expression(btempref, loc);
 
       Expression* td = Expression::make_type_descriptor(etype, loc);
       Type* etype_ptr = Type::make_pointer_type(etype);
-      space = gogo->backend()->var_expression(space_temp, VE_rvalue, loc);
+      space = gogo->backend()->var_expression(space_temp, loc);
       Expression* elhs = Expression::make_backend(space, etype_ptr, loc);
       Expression* erhs = Expression::make_backend(addr, etype_ptr, loc);
       Expression* call = Runtime::make_call(Runtime::TYPEDMEMMOVE, loc, 3,
@@ -14354,7 +14399,7 @@ Heap_expression::do_get_backend(Translate_context* context)
       assn = gogo->backend()->compound_statement(edecl, s);
     }
   decl = gogo->backend()->compound_statement(decl, assn);
-  space = gogo->backend()->var_expression(space_temp, VE_rvalue, loc);
+  space = gogo->backend()->var_expression(space_temp, loc);
   return gogo->backend()->compound_expression(decl, space, loc);
 }
 
@@ -14678,7 +14723,7 @@ Ptrmask_symbol_expression::do_get_backend(Translate_context* context)
 
   Bvariable* bvar = this->type_->gc_ptrmask_var(gogo, ptrsize, ptrdata);
   Location bloc = Linemap::predeclared_location();
-  Bexpression* bref = gogo->backend()->var_expression(bvar, VE_rvalue, bloc);
+  Bexpression* bref = gogo->backend()->var_expression(bvar, bloc);
   Bexpression* baddr = gogo->backend()->address_expression(bref, bloc);
 
   Type* uint8_type = Type::lookup_integer_type("uint8");
@@ -15397,16 +15442,14 @@ Interface_mtable_expression::do_get_backend(Translate_context* context)
   Gogo* gogo = context->gogo();
   Location loc = Linemap::predeclared_location();
   if (this->bvar_ != NULL)
-    return gogo->backend()->var_expression(this->bvar_, VE_rvalue,
-                                           this->location());
+    return gogo->backend()->var_expression(this->bvar_, this->location());
 
   const Typed_identifier_list* interface_methods = this->itype_->methods();
   go_assert(!interface_methods->empty());
 
-  std::string mangled_name = ((this->is_pointer_ ? "__go_pimt__" : "__go_imt_")
-			      + this->itype_->mangled_name(gogo)
-			      + "__"
-			      + this->type_->mangled_name(gogo));
+  std::string mangled_name =
+    gogo->interface_method_table_name(this->itype_, this->type_,
+				      this->is_pointer_);
 
   // Set is_public if we are converting a named type to an interface
   // type that is defined in the same package as the named type, and
@@ -15439,8 +15482,7 @@ Interface_mtable_expression::do_get_backend(Translate_context* context)
       this->bvar_ =
           gogo->backend()->immutable_struct_reference(mangled_name, asm_name,
                                                       btype, loc);
-      return gogo->backend()->var_expression(this->bvar_, VE_rvalue,
-                                             this->location());
+      return gogo->backend()->var_expression(this->bvar_, this->location());
     }
 
   // The first element is the type descriptor.
@@ -15505,7 +15547,7 @@ Interface_mtable_expression::do_get_backend(Translate_context* context)
 						  !is_public, btype, loc);
   gogo->backend()->immutable_struct_set_init(this->bvar_, mangled_name, false,
                                              !is_public, btype, loc, ctor);
-  return gogo->backend()->var_expression(this->bvar_, VE_lvalue, loc);
+  return gogo->backend()->var_expression(this->bvar_, loc);
 }
 
 void

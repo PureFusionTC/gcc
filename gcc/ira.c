@@ -2286,9 +2286,6 @@ ira_setup_eliminable_regset (void)
 	   && cfun->can_throw_non_call_exceptions)
        || crtl->accesses_prior_frames
        || (SUPPORTS_STACK_ALIGNMENT && crtl->stack_realign_needed)
-       /* We need a frame pointer for all Cilk Plus functions that use
-	  Cilk keywords.  */
-       || (flag_cilkplus && cfun->is_cilk_function)
        || targetm.frame_pointer_required ());
 
     /* The chance that FRAME_POINTER_NEEDED is changed from inspecting
@@ -3842,9 +3839,9 @@ combine_and_move_insns (void)
 	}
 
       /* Last pass - adjust debug insns referencing cleared regs.  */
-      if (MAY_HAVE_DEBUG_INSNS)
+      if (MAY_HAVE_DEBUG_BIND_INSNS)
 	for (rtx_insn *insn = get_insns (); insn; insn = NEXT_INSN (insn))
-	  if (DEBUG_INSN_P (insn))
+	  if (DEBUG_BIND_INSN_P (insn))
 	    {
 	      rtx old_loc = INSN_VAR_LOCATION_LOC (insn);
 	      INSN_VAR_LOCATION_LOC (insn)
@@ -4399,6 +4396,12 @@ rtx_moveable_p (rtx *loc, enum op_type type)
 	 as moveable ones.  The insn scheduler also considers them as barrier
 	 for a reason.  */
       return false;
+
+    case ASM_OPERANDS:
+      /* The same is true for volatile asm: it has unknown side effects, it
+         cannot be moved at will.  */
+      if (MEM_VOLATILE_P (x))
+	return false;
 
     default:
       break;
